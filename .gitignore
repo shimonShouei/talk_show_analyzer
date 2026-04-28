@@ -42,6 +42,13 @@ Thumbs.db
 # Logs
 logs/
 *.log
+slurm_logs/
+
+# Test outputs
+test_output/
+
+# NFS turds
+.nfs*
 
 # Poetry
 poetry.lock
