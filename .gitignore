@@ -29,6 +29,7 @@ ENV/
 *.flac
 data/
 recordings/
+chunks/
 
 # Database
 *.db
@@ -37,3 +38,20 @@ recordings/
 # OS
 .DS_Store
 Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Poetry
+poetry.lock
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
