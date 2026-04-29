@@ -147,8 +147,8 @@ This show has a flexible, unpredictable structure:
   - Multiple news stories
 
 • MAIN CONTENT: Mix of interviews and manifests
-  - INTERVIEW: Host + 1 guest discussing a topic
-  - MANIFEST: Host + multiple guests discussing a position/proposal
+  - INTERVIEW: 2 Hosts + 1 guest discussing a topic
+  - MANIFEST: 2 Hosts only (no guests) discussing a position/topic
   - Can transition between interview and manifest multiple times
   - No fixed order or timing
 
@@ -165,12 +165,12 @@ Newsreaders: {', '.join(show.newsreaders)}
 SEGMENTATION HINTS:
 ===================
 • News segment typically appears at the start, lasts 5-6 minutes
-• Use speaker count to distinguish interview (1-2 speakers) from manifest (3+ speakers)
+• Use speaker count to distinguish:
+  - MANIFEST: Exactly 2 speakers (the 2 hosts) with no guests = hosts discussing topic
+  - INTERVIEW: 3+ speakers = 2 hosts + 1+ guests discussing topic
 • Ad blocks have commercial language ("call now", "visit", "special offer")
 • Transitions between interview and manifest are common
-• When in doubt between interview and manifest, use speaker count and topic unity:
-  - Interview: focused Q&A with one guest
-  - Manifest: multiple guests discussing a unified position or proposal
+• Manifest has the same 2 host voices throughout (no new guest voices)
 """
 
     return context
