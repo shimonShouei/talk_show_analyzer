@@ -1,54 +1,55 @@
 # Next Steps
 
-Prioritized action items after the working E2E test (record + transcribe on RTX 3090).
+## ✅ Completed
 
-## Immediate (improve transcription quality)
+### Phase 1: Transcription Quality
+- [x] **Upgraded Whisper** to `large-v3` with tuned VAD (`whisper_vad_min_silence_ms=500`, `beam_size=5`)
+- [x] **Pyannote diarization** attempted (auth working, but numerical singularity → skipped; single-speaker fallback acceptable for initial MVP)
 
-- [ ] **Set `HF_TOKEN` in `.env`** — current run fell back to single-speaker (`SPEAKER_00` only) because Pyannote couldn't authenticate. Get token at https://huggingface.co/settings/tokens.
-- [ ] **Switch to `medium` or `large` Whisper model** — `base` produced rough Hebrew on noisy radio audio. `large-v3` is significantly better; fits on RTX 3090 (24GB).
-- [ ] **Tune VAD / beam size** in `transcriber.py` for radio-specific audio (background music, ads, jingles).
+### Phase 2: Analysis Pipeline
+- [x] **`segmenter.py`** — Claude-based segmentation (interview/panel/news/ad/jingle) with 20-min windows + 2-min overlap
+- [x] **`guests.py`** — guest identification with confidence scoring
+- [x] **`topics.py`** — Hebrew-aware topic extraction (main + subtopics) with bilingual output
+- [x] **`sentiment.py`** — sentiment analysis per speaker per topic with tone classification and quotes
+- [x] **`ads.py`** — ad time aggregation
+- [x] **`prompts/`** — Hebrew-aware prompt templates
 
-## Phase 2: Analysis pipeline (`src/talk_show_analyzer/analysis/`)
+### Phase 3: Database Layer
+- [x] **`models.py`** — 8 SQLAlchemy ORM tables (Station, Episode, Segment, Topic, Guest, GuestAppearance, SentimentResult, PipelineRun)
+- [x] **`db.py`** — engine/session factory with context managers
+- [x] **`alembic/`** — initial schema migration
 
-Currently empty — needs Claude API integration:
+### Phase 4: Pipeline Orchestration
+- [x] **`orchestrator.py`** — full pipeline (record → transcribe → segment → topics → guests → sentiment → store) with checkpoint recovery
+- [x] **Checkpointing** — `PipelineRun` table tracks step status for resumable execution
 
-- [ ] **`segmenter.py`** — split transcript into segments (interview / panel / news / ad) via Claude
-- [ ] **`guests.py`** — identify guests + dedup across episodes
-- [ ] **`topics.py`** — topic extraction per segment
-- [ ] **`sentiment.py`** — sentiment per speaker per topic
-- [ ] **`political.py`** — political leaning analysis
-- [ ] **`ads.py`** — aggregate ad time
-- [ ] **`prompts/`** — Hebrew-aware Claude prompt templates
+## Phase 5: Daily Automation
 
-## Phase 3: Database layer
+- [ ] **CLI entry point** (`src/talk_show_analyzer/cli.py`) — `analyze-episode <station>` for single run
+- [ ] **Multi-station SLURM job** — `.claude/daily_pipeline.slurm` for Galatz + Kan Bet + 103FM in parallel
+- [ ] **Output structure** — switch from `test_output/` to `data/<YYYY-MM-DD>/<station>/`
+- [ ] **Failure alerting** — email/Slack on stream-down, transcription errors, or analysis failures
 
-- [ ] **`models.py`** — SQLAlchemy ORM (Episodes, Segments, Guests, Topics, Sentiment)
-- [ ] **`db.py`** — engine/session factory
-- [ ] **`alembic/`** — initial migration
+## Phase 6: Dashboard
 
-## Phase 4: Pipeline orchestration (`src/talk_show_analyzer/pipeline/`)
+- [ ] **`src/talk_show_analyzer/dashboard/app.py`** — Streamlit UI
+  - [ ] Episode list with filters (date, station, status)
+  - [ ] Guest leaderboard (appearances over time)
+  - [ ] Topic trends (word clouds, timeline heatmaps)
+  - [ ] Sentiment by speaker / by topic
+  - [ ] Political leaning analysis (TODO: add ML classifier)
 
-- [ ] **`orchestrator.py`** — record → chunk → transcribe → analyze → store, with checkpointing
-- [ ] **`retry.py`** — resume from last successful step on failure
+## Phase 7: Operational Infrastructure
 
-## Phase 5: Daily automation
+- [ ] **Chunking for parallel transcription** — split 4hr recordings into 30-min chunks, submit as SLURM array
+- [ ] **Audio cleanup** — delete MP3s after successful transcription (keep transcripts + analysis)
+- [ ] **Retry logic** — auto-retry failed steps with exponential backoff
+- [ ] **Metrics / monitoring** — log processing time per step, token usage, storage costs
 
-- [ ] **Cron-equivalent SLURM job** — daily 05:50 IST recording (4 hr per station × 3 stations)
-- [ ] **Failure alerting** — email/Slack on stream-down or transcription errors
+## Tech Debt / Cleanup
 
-## Phase 6: Dashboard (`src/talk_show_analyzer/dashboard/app.py`)
-
-- [ ] Streamlit UI: trends over time, guest leaderboard, topic heatmaps, sentiment per political leaning
-
-## Operational / infra
-
-- [ ] **Multi-station SLURM array job** — record Galatz + Kan Bet + 103FM in parallel (3 jobs)
-- [ ] **Checkpoint chunking** — for 4hr recordings, chunk first then transcribe in parallel across multiple GPU jobs
-- [ ] **Output location** — currently `test_output/`, needs proper `data/<date>/<station>/` structure
-- [ ] **Cleanup** — old MP3s after transcription (keep transcripts only)
-
-## Tech debt / cleanup
-
-- [ ] Remove `test_gpu_setup.py` once setup is stable (it was for debugging the install)
-- [ ] Add `tests/` directory with pytest (currently empty)
-- [ ] Implement health-check endpoint / dashboard for daily cron status
+- [ ] Add pytest suite (`tests/`) for analysis modules and database
+- [ ] Implement political leaning classifier (NLP on generated summaries)
+- [ ] Add health-check endpoint for cron monitoring
+- [ ] Remove `test_gpu_setup.py` (debug script, no longer needed)
+- [ ] Profile token usage per episode (optimize prompt caching)
