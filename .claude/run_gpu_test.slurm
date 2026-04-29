@@ -3,7 +3,7 @@
 #SBATCH --time=0:30:00
 #SBATCH --mem=16G
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:rtx_3090:1
+#SBATCH --gres=gpu:rtx_2080:1   # RTX 2080 = weakest GPU compatible with PyTorch 2.11 (Pascal gtx_1080 excluded)
 #SBATCH --output=/home/shouei/talk_show_analyzer/slurm_logs/job_%j.out
 #SBATCH --error=/home/shouei/talk_show_analyzer/slurm_logs/job_%j.err
 

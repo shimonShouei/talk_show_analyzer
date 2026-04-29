@@ -12,7 +12,7 @@ authors = [{name = "Shimon", email = "shimon@example.com"}]
 dependencies = [
     # Audio processing
     "faster-whisper>=1.0.0",           # Free Whisper inference
-    "pyannote.audio>=3.0.0",           # Free diarization
+    "pyannote.audio>=4.0,<5.0",        # Free diarization (v4 + community-1 model)
     "librosa>=0.10.0",                 # Audio utilities
     "pydub>=0.25.1",                   # Audio manipulation
 

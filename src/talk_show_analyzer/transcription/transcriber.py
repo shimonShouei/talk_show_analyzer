@@ -5,8 +5,10 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
 
+import torch
 from faster_whisper import WhisperModel
 from pyannote.audio import Pipeline
+from huggingface_hub import login
 from loguru import logger
 
 from talk_show_analyzer.config import settings
@@ -57,20 +59,35 @@ class Transcriber:
 
     def __init__(
         self,
-        model_size: str = "base",
+        model_size: str | None = None,
         device: str = "auto",
         compute_type: str = "float16",
         enable_diarization: bool = True,
+        beam_size: int | None = None,
+        vad_min_silence_ms: int | None = None,
     ):
         """
         Initialize transcriber.
 
         Args:
-            model_size: Whisper model size (tiny, base, small, medium, large)
+            model_size: Whisper model size (tiny, base, small, medium, large, large-v3).
+                        If None, uses settings.whisper_model
             device: Device to use (cuda, cpu, auto)
             compute_type: Computation type (float16, float32, int8, etc)
             enable_diarization: Whether to perform speaker diarization
+            beam_size: Beam search width. If None, uses settings.whisper_beam_size
+            vad_min_silence_ms: Silence duration for VAD. If None, uses settings.whisper_vad_min_silence_ms
         """
+        if model_size is None:
+            model_size = settings.whisper_model
+        if beam_size is None:
+            beam_size = settings.whisper_beam_size
+        if vad_min_silence_ms is None:
+            vad_min_silence_ms = settings.whisper_vad_min_silence_ms
+
+        self.beam_size = beam_size
+        self.vad_min_silence_ms = vad_min_silence_ms
+
         logger.info(f"Loading Whisper model: {model_size}")
         self.whisper_model = WhisperModel(
             model_size, device=device, compute_type=compute_type
@@ -83,12 +100,17 @@ class Transcriber:
             logger.info("Loading Pyannote diarization pipeline")
             # Requires HuggingFace token for authentication
             try:
+                if settings.hf_token:
+                    login(token=settings.hf_token, add_to_git_credential=False)
                 self.diarization_pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.0",
-                    use_auth_token=True,  # Set HF_TOKEN env var
+                    "pyannote/speaker-diarization-community-1"
                 )
-                if device == "cuda" or device == "auto":
-                    self.diarization_pipeline = self.diarization_pipeline.to("cuda")
+                # Convert device string to torch.device for Pyannote v3.0
+                if device == "auto":
+                    device_obj = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                else:
+                    device_obj = torch.device(device)
+                self.diarization_pipeline = self.diarization_pipeline.to(device_obj)
             except Exception as e:
                 logger.warning(f"Failed to load diarization pipeline: {e}")
                 logger.warning("Continuing without diarization")
@@ -120,8 +142,9 @@ class Transcriber:
         segments, info = self.whisper_model.transcribe(
             str(audio_path),
             language=language,
-            beam_size=5,
-            vad_filter=True,  # Voice activity detection reduces hallucinations
+            beam_size=self.beam_size,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": self.vad_min_silence_ms},
         )
 
         # Collect full transcript
@@ -179,26 +202,39 @@ class Transcriber:
         logger.info("Running speaker diarization...")
 
         try:
-            # Run diarization
+            # Pre-decode to a 16kHz mono tensor and pass the in-memory dict form.
+            # Feeding MP3 paths directly causes pyannote sample-count mismatches
+            # (MP3 decoders return ~158895 samples for a 10s @16kHz chunk vs the
+            # expected 160000); the dict form skips pyannote's internal decode.
+            import torchaudio
+
+            waveform, sr = torchaudio.load(str(audio_path))
+            if waveform.shape[0] > 1:
+                waveform = waveform.mean(dim=0, keepdim=True)
+            target_sr = 16000
+            if sr != target_sr:
+                waveform = torchaudio.functional.resample(waveform, sr, target_sr)
+            audio_input = {"waveform": waveform, "sample_rate": target_sr}
+
             diarization_kwargs = {"num_speakers": num_speakers} if num_speakers else {}
-            diarization = self.diarization_pipeline(
-                str(audio_path),
+            diarization_output = self.diarization_pipeline(
+                audio_input,
                 **diarization_kwargs,
             )
 
-            # Map Whisper segments to speakers based on timestamp overlap
+            # pyannote v4 returns DiarizeOutput; use exclusive_speaker_diarization
+            # (no overlapping turns) for cleaner whisper-segment → speaker mapping.
+            annotation = diarization_output.exclusive_speaker_diarization
+
+            # Map Whisper segments to speakers based on timestamp overlap.
+            # Labels from pyannote are already formatted like "SPEAKER_00".
             diarized_segments = []
             for seg in whisper_segments:
-                seg_start = seg.start
-                seg_end = seg.end
-                seg_mid = (seg_start + seg_end) / 2
-
-                # Find the speaker active at segment midpoint
+                seg_mid = (seg.start + seg.end) / 2
                 speaker = "SPEAKER_UNKNOWN"
-                for turn, _, speaker_obj in diarization.itertracks(yield_label=True):
+                for turn, _, speaker_obj in annotation.itertracks(yield_label=True):
                     if turn.start <= seg_mid < turn.end:
-                        # Extract speaker number (e.g., "Speaker 0" → "SPEAKER_00")
-                        speaker = f"SPEAKER_{speaker_obj.split()[-1]:02d}"
+                        speaker = str(speaker_obj)
                         break
 
                 diarized_segments.append(

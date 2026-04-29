@@ -4,7 +4,7 @@
 
 ### Phase 1: Transcription Quality
 - [x] **Upgraded Whisper** to `large-v3` with tuned VAD (`whisper_vad_min_silence_ms=500`, `beam_size=5`)
-- [x] **Pyannote diarization** attempted (auth working, but numerical singularity → skipped; single-speaker fallback acceptable for initial MVP)
+- [x] **Pyannote diarization working end-to-end** — pinned `pyannote.audio>=4.0,<5.0`, switched model to `pyannote/speaker-diarization-community-1`, pre-decode audio to dict form (bypasses MP3 sample-count mismatch), use `DiarizeOutput.exclusive_speaker_diarization` for v4 API. Verified on RTX 2080 Ti: 11 distinct speakers detected on a 5-min Galatz sample.
 
 ### Phase 2: Analysis Pipeline
 - [x] **`segmenter.py`** — Claude-based segmentation (interview/panel/news/ad/jingle) with 20-min windows + 2-min overlap
