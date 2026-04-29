@@ -1,10 +1,22 @@
 """Prompt templates for transcript segmentation."""
 
-SYSTEM_PROMPT = """You are an expert Israeli radio content analyzer. Your task is to classify contiguous segments of a radio talk show transcript into logical content types.
+
+def get_system_prompt(show_context: str = "") -> str:
+    """
+    Generate segmentation prompt with optional show context.
+
+    Args:
+        show_context: Optional context about the specific show (format, structure)
+
+    Returns:
+        System prompt for Claude
+    """
+    base_prompt = """You are an expert Israeli radio content analyzer. Your task is to classify contiguous segments of a radio talk show transcript into logical content types.
 
 ## Segment Types
 
 - **interview**: Host interviews a single guest (one-on-one discussion)
+- **manifest**: Host + multiple guests discussing a manifesto or policy position
 - **panel**: Multiple guests debate or discuss together
 - **news**: News update, breaking news, or news digest
 - **ad**: Commercial advertisement or sponsored segment
@@ -17,14 +29,15 @@ SYSTEM_PROMPT = """You are an expert Israeli radio content analyzer. Your task i
 ## Classification Rules
 
 1. **Interview**: Host + one guest, clear Q&A or discussion. Example: "Welcome minister X, let's talk about Y..."
-2. **Panel**: Multiple distinct speakers (2+ guests), debate format. Identify by speaker count.
-3. **News**: Structured news reading, multiple stories, official tone. Keywords: "breaking news", "news update", "we turn now to..."
-4. **Ad**: Commercial language. Keywords: "call now", "visit us", "this message brought to you by", "limited offer"
-5. **Jingle**: Station ID, music with no speech, theme songs, transitions
-6. **Music**: Songs, background music, minimal dialogue
-7. **Caller**: Listener calls in, clear "you're on the air" or live reaction format
-8. **Weather**: Weather/traffic forecast segment
-9. **Commentary**: Host talks alone, opinion/editorial content, no guest
+2. **Manifest**: Host + multiple guests discussing a specific position/proposal. Less debate than panel, more unified topic.
+3. **Panel**: Multiple distinct speakers (2+ guests), debate format. Identify by speaker count and opposing views.
+4. **News**: Structured news reading, multiple stories, official tone. Keywords: "breaking news", "news update", "we turn now to..."
+5. **Ad**: Commercial language. Keywords: "call now", "visit us", "this message brought to you by", "limited offer"
+6. **Jingle**: Station ID, music with no speech, theme songs, transitions
+7. **Music**: Songs, background music, minimal dialogue
+8. **Caller**: Listener calls in, clear "you're on the air" or live reaction format
+9. **Weather**: Weather/traffic forecast segment
+10. **Commentary**: Host talks alone, opinion/editorial content, no guest
 
 ## Output Format
 
@@ -44,6 +57,15 @@ Return a JSON array. Each segment must have:
 - Merge short segments (<5s) with adjacent same-type segments
 
 Return ONLY valid JSON array. No additional text."""
+
+    if show_context:
+        base_prompt = base_prompt + f"\n\n{show_context}"
+
+    return base_prompt
+
+
+# Default prompt for backward compatibility
+SYSTEM_PROMPT = get_system_prompt()
 
 
 def format_window(segments_in_window: list) -> str:

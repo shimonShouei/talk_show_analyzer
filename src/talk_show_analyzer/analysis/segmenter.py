@@ -11,8 +11,10 @@ from talk_show_analyzer.config import settings
 from talk_show_analyzer.transcription.transcriber import TranscriptionResult
 from talk_show_analyzer.analysis.prompts.segmentation import (
     SYSTEM_PROMPT,
+    get_system_prompt,
     format_window,
 )
+from talk_show_analyzer.recorder.shows import get_show, format_show_context
 
 
 @dataclass
@@ -34,14 +36,18 @@ class Segmenter:
     OVERLAP_SECONDS = 2 * 60  # 2 minutes
     MERGE_GAP_SECONDS = 30  # merge same-type segments < 30s apart
 
-    def __init__(self, model: str = "claude-haiku-4-5-20251001"):
+    def __init__(self, model: str = "claude-haiku-4-5-20251001", station: Optional[str] = None):
         """Initialize segmenter.
 
         Args:
             model: Claude model to use for segmentation
+            station: Station name (galatz, kan_bet, 103fm) for show context
         """
         self.model = model
         self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        self.station = station
+        self.show = get_show(station) if station else None
+        self.system_prompt = None  # Set during segment()
 
     def segment(self, transcript: TranscriptionResult) -> list[Segment]:
         """
@@ -58,13 +64,21 @@ class Segmenter:
             f"{len(transcript.segments)} speaker segments"
         )
 
+        # Use show context if available
+        if self.show:
+            show_context = format_show_context(self.show)
+            self.system_prompt = get_system_prompt(show_context)
+            logger.info(f"Using show context: {self.show.name_en}")
+        else:
+            self.system_prompt = SYSTEM_PROMPT
+
         # Create windows with overlap
         windows = self._create_windows(transcript)
         logger.info(f"Created {len(windows)} analysis windows")
 
         # Process each window with Claude
         all_segments = []
-        for i, window in enumerate(windows):
+        for i, window in enumerate(windows, start=1):
             logger.info(
                 f"Processing window {i+1}/{len(windows)} "
                 f"({window[0].start:.0f}s - {window[-1].end:.0f}s)"
@@ -134,7 +148,7 @@ class Segmenter:
                 system=[
                     {
                         "type": "text",
-                        "text": SYSTEM_PROMPT,
+                        "text": self.system_prompt,
                         "cache_control": {"type": "ephemeral"},
                     }
                 ],
