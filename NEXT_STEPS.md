@@ -30,14 +30,14 @@
 - [ ] **Output structure** — switch from `test_output/` to `data/<YYYY-MM-DD>/<station>/`
 - [ ] **Failure alerting** — email/Slack on stream-down, transcription errors, or analysis failures
 
-## Phase 6: Dashboard
-
-- [ ] **`src/talk_show_analyzer/dashboard/app.py`** — Streamlit UI
-  - [ ] Episode list with filters (date, station, status)
-  - [ ] Guest leaderboard (appearances over time)
-  - [ ] Topic trends (word clouds, timeline heatmaps)
-  - [ ] Sentiment by speaker / by topic
-  - [ ] Political leaning analysis (TODO: add ML classifier)
+### Phase 6: Dashboard
+- [x] **`src/talk_show_analyzer/dashboard/app.py`** — Streamlit main page
+  - [x] Episode list with filters (date, station, status)
+  - [x] Guest leaderboard (appearances over time)
+  - [x] Topic trends (frequency and sentiment analysis)
+  - [x] Sentiment by speaker / by topic with tone classification
+  - [x] Daily overview with key metrics
+  - [x] Multi-page app structure with 5 analysis pages
 
 ## Phase 7: Operational Infrastructure
 
