@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from loguru import logger
 
+from talk_show_analyzer.config import settings
 from talk_show_analyzer.recorder import check_all_streams, record_station
 from talk_show_analyzer.transcription import Transcriber
 
@@ -48,17 +49,12 @@ def main():
 
     # Step 3: Transcribe
     logger.info("\n=== INITIALIZING TRANSCRIBER ===\n")
-    logger.info("Loading Faster-Whisper (base model)...")
+    logger.info(f"Loading Faster-Whisper ({settings.whisper_model} model)...")
     logger.info("Loading Pyannote diarization pipeline...")
     logger.info("(This may take a minute on first run)\n")
 
     try:
-        transcriber = Transcriber(
-            model_size="base",
-            device="auto",
-            compute_type="float16",
-            enable_diarization=True,
-        )
+        transcriber = Transcriber(enable_diarization=True)
     except Exception as e:
         logger.error(f"Failed to initialize transcriber: {e}")
         logger.info(

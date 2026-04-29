@@ -6,12 +6,9 @@ import json
 from talk_show_analyzer.transcription import Transcriber
 
 # Initialize transcriber with Faster-Whisper + Pyannote
-transcriber = Transcriber(
-    model_size="base",  # Try "tiny" for faster results
-    device="auto",      # Use GPU if available
-    compute_type="float16",
-    enable_diarization=True,
-)
+# Uses defaults from .env: large-v3 model, float16 compute, beam_size=5
+# Overrides: transcriber = Transcriber(model_size="base", beam_size=5)
+transcriber = Transcriber(enable_diarization=True)
 
 # Transcribe an audio file (Hebrew)
 audio_file = Path("sample_radio.mp3")
