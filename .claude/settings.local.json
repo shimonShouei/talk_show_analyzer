@@ -1,7 +1,16 @@
 {
   "permissions": {
     "allow": [
-      "WebSearch"
+      "WebSearch",
+      "Bash(nvidia-smi)",
+      "Bash(squeue *)",
+      "Bash(pkill -9 -f \"pip install\")",
+      "Bash(conda --version)",
+      "Bash(conda env *)",
+      "Bash(python *)",
+      "Bash(conda activate *)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'Implement Phase 6: Comprehensive Streamlit dashboard with 5 analysis pages *)"
     ]
   }
 }

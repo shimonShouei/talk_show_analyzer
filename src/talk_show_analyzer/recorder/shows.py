@@ -5,16 +5,6 @@ from typing import Optional
 
 
 @dataclass
-class SegmentTemplate:
-    """Expected segment in a show's recurring structure."""
-
-    type: str  # "interview", "manifest", "news", "ads", "jingle"
-    expected_minute: int  # When this segment typically starts (0 = :00, 25 = :25, etc.)
-    expected_duration: int  # Duration in minutes
-    description: str  # For validation prompts
-
-
-@dataclass
 class ShowDefinition:
     """Definition of a recurring radio show."""
 
@@ -24,9 +14,6 @@ class ShowDefinition:
     start_time: str  # "08:00" (24-hour format)
     end_time: str  # "10:00"
     duration_minutes: int  # Total show length (e.g., 120 for 2 hours)
-
-    # Recurring structure (repeats every hour)
-    hourly_segments: list[SegmentTemplate]
 
     # Known people on the show
     hosts: list[str]  # Names of regular hosts
@@ -44,32 +31,6 @@ SHOWS = {
         start_time="08:00",
         end_time="10:00",
         duration_minutes=120,
-        hourly_segments=[
-            SegmentTemplate(
-                type="interview",
-                expected_minute=0,
-                expected_duration=25,
-                description="In-depth interview with guest(s) or manifesto discussion",
-            ),
-            SegmentTemplate(
-                type="ads",
-                expected_minute=25,
-                expected_duration=4,
-                description="Commercial ad block",
-            ),
-            SegmentTemplate(
-                type="news",
-                expected_minute=29,
-                expected_duration=5,
-                description="News headlines and stories (~5 min newsreader)",
-            ),
-            SegmentTemplate(
-                type="interview",
-                expected_minute=34,
-                expected_duration=26,
-                description="Return to interview or next segment",
-            ),
-        ],
         hosts=[
             "רננה הראל",  # Rona Harel (example)
             "גלעד שליט",    # Gilad Shalit (example)
@@ -80,7 +41,7 @@ SHOWS = {
         description=(
             "Galatz morning show (08:00-10:00). "
             "Features interviews with political figures, journalists, and experts. "
-            "Hourly news at :29. Ad blocks at :25. Two complete cycles per day."
+            "Daily news update. Two-hour show with flexible segment structure."
         ),
     ),
     "kan_bet": ShowDefinition(
@@ -90,32 +51,6 @@ SHOWS = {
         start_time="08:00",
         end_time="10:00",
         duration_minutes=120,
-        hourly_segments=[
-            SegmentTemplate(
-                type="interview",
-                expected_minute=0,
-                expected_duration=25,
-                description="In-depth interview or panel discussion",
-            ),
-            SegmentTemplate(
-                type="ads",
-                expected_minute=25,
-                expected_duration=4,
-                description="Commercial ad block",
-            ),
-            SegmentTemplate(
-                type="news",
-                expected_minute=29,
-                expected_duration=5,
-                description="News headlines and stories",
-            ),
-            SegmentTemplate(
-                type="interview",
-                expected_minute=34,
-                expected_duration=26,
-                description="Return to interview or next topic",
-            ),
-        ],
         hosts=[
             "מוניקה תסונה",    # Monika Tasuna (example)
             "רונית סנדר",      # Ronit Sander (example)
@@ -126,7 +61,7 @@ SHOWS = {
         description=(
             "Kan Reshet Bet morning show (08:00-10:00). "
             "Features discussions on current events, politics, and social issues. "
-            "Hourly news updates. Ad blocks at :25. Two complete cycles per day."
+            "Daily news update. Two-hour show with flexible segment structure."
         ),
     ),
     "103fm": ShowDefinition(
@@ -136,32 +71,6 @@ SHOWS = {
         start_time="09:00",
         end_time="11:00",
         duration_minutes=120,
-        hourly_segments=[
-            SegmentTemplate(
-                type="interview",
-                expected_minute=0,
-                expected_duration=25,
-                description="In-depth interview with personalities",
-            ),
-            SegmentTemplate(
-                type="ads",
-                expected_minute=25,
-                expected_duration=4,
-                description="Commercial ad block",
-            ),
-            SegmentTemplate(
-                type="news",
-                expected_minute=29,
-                expected_duration=5,
-                description="News headlines and stories",
-            ),
-            SegmentTemplate(
-                type="interview",
-                expected_minute=34,
-                expected_duration=26,
-                description="Return to interview or next segment",
-            ),
-        ],
         hosts=[
             "עמירה עמיר",      # Amira Amir (example)
             "ניר ישראלי",      # Nir Israeli (example)
@@ -172,7 +81,7 @@ SHOWS = {
         description=(
             "103FM morning show (09:00-11:00). "
             "Features cultural discussion, music, and current events. "
-            "Hourly news at :29. Ad blocks at :25. Two complete cycles per day."
+            "Daily news update. Two-hour show with flexible segment structure."
         ),
     ),
 }
@@ -209,25 +118,6 @@ def get_show(station: str, time: Optional[str] = None) -> Optional[ShowDefinitio
     return None
 
 
-def get_segment_at_minute(show: ShowDefinition, minute_in_hour: int) -> Optional[SegmentTemplate]:
-    """
-    Get expected segment template at a specific minute within the hour.
-
-    Args:
-        show: ShowDefinition
-        minute_in_hour: Minute within the hour (0-59)
-
-    Returns:
-        SegmentTemplate if found, else None
-    """
-    for segment in show.hourly_segments:
-        if (segment.expected_minute <= minute_in_hour <
-            segment.expected_minute + segment.expected_duration):
-            return segment
-
-    return None
-
-
 def format_show_context(show: ShowDefinition) -> str:
     """
     Format show information for inclusion in analysis prompts.
@@ -236,7 +126,7 @@ def format_show_context(show: ShowDefinition) -> str:
         show: ShowDefinition
 
     Returns:
-        Formatted string describing the show and its structure
+        Formatted string describing the show format and participants
     """
     context = f"""
 SHOW CONTEXT:
@@ -248,27 +138,39 @@ Duration: {show.duration_minutes} minutes
 Description:
 {show.description}
 
-RECURRING HOURLY STRUCTURE:
-==========================
-This show repeats the same structure every hour. Expect:
-"""
+FLEXIBLE SHOW FORMAT:
+====================
+This show has a flexible, unpredictable structure:
 
-    for segment in show.hourly_segments:
-        context += f"\n  • {segment.type.upper()} at minute {segment.expected_minute} (~{segment.expected_duration} min)"
-        context += f"\n    {segment.description}"
+• OPENING NEWS: ~5-6 minutes of news headlines (typically at start)
+  - Delivered by newsreader
+  - Multiple news stories
 
-    context += f"\n\nKNOWN PARTICIPANTS:"
-    context += f"\n  Hosts: {', '.join(show.hosts)}"
-    context += f"\n  Newsreaders: {', '.join(show.newsreaders)}"
+• MAIN CONTENT: Mix of interviews and manifests
+  - INTERVIEW: Host + 1 guest discussing a topic
+  - MANIFEST: Host + multiple guests discussing a position/proposal
+  - Can transition between interview and manifest multiple times
+  - No fixed order or timing
 
-    context += """
+• AD BREAKS: Commercial advertisements
+  - Appear at unpredictable times (not at fixed intervals)
+  - Duration varies (typically 2-5 minutes)
+  - Not announced in advance
+
+KNOWN PARTICIPANTS:
+===================
+Hosts: {', '.join(show.hosts)}
+Newsreaders: {', '.join(show.newsreaders)}
 
 SEGMENTATION HINTS:
 ===================
-• News segments appear at :29 of each hour and last ~5 minutes
-• Ad blocks appear at :25 of each hour and last ~4 minutes
-• Use these time markers to validate your segment predictions
-• If segments don't match the expected structure, flag low confidence
+• News segment typically appears at the start, lasts 5-6 minutes
+• Use speaker count to distinguish interview (1-2 speakers) from manifest (3+ speakers)
+• Ad blocks have commercial language ("call now", "visit", "special offer")
+• Transitions between interview and manifest are common
+• When in doubt between interview and manifest, use speaker count and topic unity:
+  - Interview: focused Q&A with one guest
+  - Manifest: multiple guests discussing a unified position or proposal
 """
 
     return context
@@ -276,9 +178,7 @@ SEGMENTATION HINTS:
 
 __all__ = [
     "ShowDefinition",
-    "SegmentTemplate",
     "SHOWS",
     "get_show",
-    "get_segment_at_minute",
     "format_show_context",
 ]

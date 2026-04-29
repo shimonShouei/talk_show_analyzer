@@ -29,8 +29,8 @@ def get_system_prompt(show_context: str = "") -> str:
 ## Classification Rules
 
 1. **Interview**: Host + one guest, clear Q&A or discussion. Example: "Welcome minister X, let's talk about Y..."
-2. **Manifest**: Host + multiple guests discussing a specific position/proposal. Less debate than panel, more unified topic.
-3. **Panel**: Multiple distinct speakers (2+ guests), debate format. Identify by speaker count and opposing views.
+2. **Manifest**: Host + 2-3 guests discussing a unified position or proposal. More focused than debate, guests aligned on topic.
+3. **Panel**: 3+ speakers, debate format with multiple perspectives. More debate-focused than manifest.
 4. **News**: Structured news reading, multiple stories, official tone. Keywords: "breaking news", "news update", "we turn now to..."
 5. **Ad**: Commercial language. Keywords: "call now", "visit us", "this message brought to you by", "limited offer"
 6. **Jingle**: Station ID, music with no speech, theme songs, transitions
