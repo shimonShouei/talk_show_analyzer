@@ -69,7 +69,10 @@ mypy src/
 - **`recorder/`**:
   - `capture.py` — `record_station(station, output_path, duration_seconds)` via ffmpeg with custom Referer/User-Agent headers (bypasses geo-blocking)
   - `streams.py` — Registry of Galatz, Kan Bet, 103FM with health checks
-- **`analysis/`, `dashboard/`, `pipeline/`, `reports/`, `models/`** — Empty placeholders (see `PLAN.md`)
+- **`analysis/`** — Segmentation, topic extraction, guest identification, sentiment analysis
+- **`dashboard/`** — Streamlit multi-page app (Overview, Episodes, Guests, Topics, Sentiment)
+- **`pipeline/`** — Orchestrator with checkpoint-based recovery, database persistence
+- **`db.py`** — SQLAlchemy engine + session management
 
 ## SLURM Cluster Notes (BGU)
 
@@ -108,13 +111,15 @@ scancel <JOBID>
 
 ## Codebase Maturity
 
-✅ Transcription + diarization (working)
-✅ Recording from streams (working — verified on Galatz)
+✅ Transcription + diarization v4 (working — Pyannote community model)
+✅ Recording from streams (working — verified on Galatz with geo-blocking bypass)
 ✅ SLURM job submission (working — `.claude/run_gpu_test.slurm`)
-⏳ Analysis modules (TODO — Claude prompts for guests/topics/sentiment)
-⏳ Pipeline orchestration (TODO)
-⏳ Database layer (TODO)
-⏳ Dashboard (TODO)
+✅ Analysis modules (working — Claude Sonnet for segmentation/topics/guests/sentiment)
+✅ Pipeline orchestration (working — full E2E with checkpoint recovery)
+✅ Database layer (working — PostgreSQL with SQLAlchemy ORM + Alembic migrations)
+✅ Dashboard (working — Streamlit multi-page with 5 analysis views)
+⏳ Daily automation (TODO — CLI + SLURM job for 3 stations in parallel)
+⏳ Political leaning (TODO — Claude Opus classifier with Israeli context)
 
 See `PLAN.md` for full roadmap and `NEXT_STEPS.md` for prioritized next actions.
 
