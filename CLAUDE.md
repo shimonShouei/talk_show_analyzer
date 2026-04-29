@@ -23,9 +23,12 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 cp .env.example .env  # Add HF_TOKEN, DATABASE_URL, ANTHROPIC_API_KEY
 ```
 
-**Run E2E test (record + transcribe 5 min from Israeli radio):**
+**Run E2E test (record + transcribe + analyze + dashboard):**
 ```bash
-# Local (needs GPU)
+# Complete pipeline test with dashboard
+python test_e2e_with_dashboard.py
+
+# Or just record + transcribe (5 min)
 python test_e2e.py
 
 # Submit to SLURM cluster
@@ -95,7 +98,7 @@ scancel <JOBID>
 
 **libstdc++ mismatch**: System `libstdc++.so.6` is older than what conda packages need (missing `CXXABI_1.3.15`). Always set `LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH` after activating env, or imports of `optuna` / `pyannote` fail.
 
-**HuggingFace token required for Pyannote**: Without `HF_TOKEN`, diarization silently falls back to single-speaker (`SPEAKER_00`). See `transcriber.py` line 86.
+**Pyannote diarization (v4)**: Requires `HF_TOKEN` for auth (without it, falls back to single-speaker). Pinned to `pyannote.audio>=4.0,<5.0` with model `pyannote/speaker-diarization-community-1` — older `speaker-diarization-3.x` checkpoints fail with a Cholesky error under v4 runtime. Audio is pre-decoded to a `{"waveform", "sample_rate"}` dict before being passed to the pipeline; feeding MP3 paths directly trips a sample-count guard (~158895 vs expected 160000 at 16 kHz). The pipeline returns `DiarizeOutput`; iterate via `output.exclusive_speaker_diarization.itertracks(yield_label=True)`.
 
 **Stream recording requires Israeli IP**: BGU cluster has Israeli IP, so streams work directly. From other clouds you'd need a VPS relay.
 
