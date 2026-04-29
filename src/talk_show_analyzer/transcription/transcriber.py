@@ -2,9 +2,10 @@
 
 import json
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
+import numpy as np
 import torch
 from faster_whisper import WhisperModel
 from pyannote.audio import Pipeline
@@ -34,6 +35,9 @@ class TranscriptionResult:
     duration: float
     word_count: int
     segments: list[SpeakerSegment]  # Diarized segments with speaker labels
+    # Per-speaker embedding vectors from pyannote (label -> 1D float array).
+    # Empty when diarization is disabled or fails. Used by speaker_linking.link_chunks.
+    speaker_embeddings: dict[str, np.ndarray] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """Convert to dict for JSON serialization."""
@@ -51,6 +55,7 @@ class TranscriptionResult:
                 }
                 for seg in self.segments
             ],
+            # embeddings deliberately excluded — they're large and only useful in-process
         }
 
 
@@ -158,8 +163,9 @@ class Transcriber:
         )
 
         # Apply diarization if enabled
+        speaker_embeddings: dict[str, np.ndarray] = {}
         if self.enable_diarization and self.diarization_pipeline:
-            diarized_segments = self._apply_diarization(
+            diarized_segments, speaker_embeddings = self._apply_diarization(
                 audio_path, segments_list, num_speakers
             )
         else:
@@ -180,6 +186,7 @@ class Transcriber:
             duration=info.duration,
             word_count=word_count,
             segments=diarized_segments,
+            speaker_embeddings=speaker_embeddings,
         )
 
     def _apply_diarization(
@@ -187,7 +194,7 @@ class Transcriber:
         audio_path: Path,
         whisper_segments,
         num_speakers: Optional[int] = None,
-    ) -> list[SpeakerSegment]:
+    ) -> tuple[list[SpeakerSegment], dict[str, np.ndarray]]:
         """
         Apply speaker diarization to transcript segments.
 
@@ -197,7 +204,9 @@ class Transcriber:
             num_speakers: Optional expected speaker count
 
         Returns:
-            List of SpeakerSegment with speaker labels assigned
+            (segments, speaker_embeddings) — segments with speaker labels and a
+            dict mapping each label to its centroid embedding (1D float array).
+            The embedding dict is empty if pyannote did not return embeddings.
         """
         logger.info("Running speaker diarization...")
 
@@ -246,13 +255,26 @@ class Transcriber:
                     )
                 )
 
-            logger.info(f"Diarization complete: {len(diarized_segments)} speaker segments")
-            return diarized_segments
+            # Pair pyannote's per-speaker embeddings with their labels.
+            # speaker_embeddings is (num_speakers, dim) sorted in
+            # speaker_diarization.labels() order — see DiarizeOutput docstring.
+            embeddings: dict[str, np.ndarray] = {}
+            emb_array = diarization_output.speaker_embeddings
+            if emb_array is not None:
+                emb_labels = list(diarization_output.speaker_diarization.labels())
+                for label, vec in zip(emb_labels, emb_array):
+                    embeddings[str(label)] = np.asarray(vec)
+
+            logger.info(
+                f"Diarization complete: {len(diarized_segments)} speaker segments, "
+                f"{len(embeddings)} speaker embeddings"
+            )
+            return diarized_segments, embeddings
 
         except Exception as e:
             logger.error(f"Diarization failed: {e}")
             logger.warning("Falling back to no diarization")
-            return [
+            fallback = [
                 SpeakerSegment(
                     start=seg.start,
                     end=seg.end,
@@ -261,25 +283,155 @@ class Transcriber:
                 )
                 for seg in whisper_segments
             ]
+            return fallback, {}
+
+    def transcribe_chunked(
+        self,
+        audio_path: str | Path,
+        chunk_duration_seconds: int = 1500,
+        overlap_seconds: int = 60,
+        language: str = "he",
+        chunks_dir: Optional[str | Path] = None,
+        cleanup_chunks: bool = True,
+    ) -> TranscriptionResult:
+        """
+        Transcribe a long file by chunking, then unify speaker labels across chunks.
+
+        Each chunk is transcribed/diarized independently (so SPEAKER_00 in chunk
+        N is unrelated to SPEAKER_00 in chunk N+1), then `link_chunks` remaps
+        every chunk's labels to a shared GLOBAL_NN namespace using temporal
+        co-occurrence in the overlap window plus embedding similarity.
+
+        Args:
+            audio_path: Path to source audio
+            chunk_duration_seconds: Per-chunk length (matches Whisper context)
+            overlap_seconds: Overlap between consecutive chunks
+            language: Language code
+            chunks_dir: Where to write chunk WAVs (default: <audio>.chunks/)
+            cleanup_chunks: Delete chunk WAVs after transcription
+
+        Returns:
+            Single TranscriptionResult with absolute timestamps and global labels.
+        """
+        from talk_show_analyzer.transcription.speaker_linking import (
+            ChunkInput,
+            link_chunks,
+        )
+
+        audio_path = Path(audio_path)
+        if chunks_dir is None:
+            chunks_dir = audio_path.parent / f"{audio_path.stem}.chunks"
+        chunks_dir = Path(chunks_dir)
+
+        chunk_paths = chunk_audio(
+            audio_path,
+            chunk_duration_seconds=chunk_duration_seconds,
+            overlap_seconds=overlap_seconds,
+            output_dir=chunks_dir,
+        )
+        step_seconds = chunk_duration_seconds - overlap_seconds
+
+        chunk_inputs: list[ChunkInput] = []
+        for idx, cp in enumerate(chunk_paths):
+            offset = idx * step_seconds
+            logger.info(f"Transcribing chunk {idx} (offset={offset}s): {cp}")
+            res = self.transcribe(cp, language=language)
+            chunk_inputs.append(ChunkInput(result=res, offset_seconds=float(offset)))
+
+        linked = link_chunks(chunk_inputs, overlap_seconds=float(overlap_seconds))
+
+        # Stitch: keep all chunk-0 segments, then for chunk N>0 only segments
+        # past the overlap region (avoids double-counting the shared window).
+        stitched_segments: list[SpeakerSegment] = []
+        merged_embeddings: dict[str, np.ndarray] = {}
+        raw_text_parts: list[str] = []
+        for idx, (ci, lr) in enumerate(zip(chunk_inputs, linked)):
+            for seg in lr.segments:
+                if idx > 0 and seg.start < overlap_seconds:
+                    continue  # already covered by previous chunk's tail
+                stitched_segments.append(
+                    SpeakerSegment(
+                        start=seg.start + ci.offset_seconds,
+                        end=seg.end + ci.offset_seconds,
+                        speaker=seg.speaker,
+                        text=seg.text,
+                    )
+                )
+            raw_text_parts.append(lr.raw_text)
+            for gid, emb in lr.speaker_embeddings.items():
+                merged_embeddings.setdefault(gid, emb)
+
+        total_duration = max(
+            (ci.offset_seconds + ci.result.duration for ci in chunk_inputs),
+            default=0.0,
+        )
+        raw_text = " ".join(p for p in raw_text_parts if p)
+        word_count = len(raw_text.split())
+
+        if cleanup_chunks:
+            for cp in chunk_paths:
+                try:
+                    Path(cp).unlink()
+                except OSError:
+                    pass
+            try:
+                chunks_dir.rmdir()
+            except OSError:
+                pass
+
+        return TranscriptionResult(
+            raw_text=raw_text,
+            language=language,
+            duration=total_duration,
+            word_count=word_count,
+            segments=stitched_segments,
+            speaker_embeddings=merged_embeddings,
+        )
 
     def transcribe_file(
         self,
         audio_path: str | Path,
         output_json: Optional[str | Path] = None,
         language: str = "he",
+        chunk_threshold_seconds: int = 1800,
+        chunk_duration_seconds: int = 1500,
+        overlap_seconds: int = 60,
     ) -> TranscriptionResult:
         """
         Transcribe a file and optionally save result as JSON.
+
+        Auto-selects chunked transcription with cross-chunk speaker linking
+        when the audio is longer than ``chunk_threshold_seconds`` (default 30
+        min); shorter files use single-shot transcription.
 
         Args:
             audio_path: Path to audio file
             output_json: Optional path to save result as JSON
             language: Language code
+            chunk_threshold_seconds: Auto-chunk above this duration
+            chunk_duration_seconds: Per-chunk length when chunking
+            overlap_seconds: Overlap between chunks (must be >= 30s for reliable linking)
 
         Returns:
             TranscriptionResult
         """
-        result = self.transcribe(audio_path, language=language)
+        # Probe duration cheaply via librosa metadata
+        import librosa
+
+        duration = float(librosa.get_duration(path=str(audio_path)))
+        if duration > chunk_threshold_seconds:
+            logger.info(
+                f"Audio {duration:.0f}s > {chunk_threshold_seconds}s threshold; "
+                "using chunked transcription with cross-chunk speaker linking"
+            )
+            result = self.transcribe_chunked(
+                audio_path,
+                chunk_duration_seconds=chunk_duration_seconds,
+                overlap_seconds=overlap_seconds,
+                language=language,
+            )
+        else:
+            result = self.transcribe(audio_path, language=language)
 
         if output_json:
             output_json = Path(output_json)
