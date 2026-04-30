@@ -1,7 +1,17 @@
 {
   "permissions": {
     "allow": [
-      "WebSearch"
+      "WebSearch",
+      "Bash(python *)",
+      "Bash(curl -I -H \"Referer: https://103fm.maariv.co.il/\" \"https://stream.103fm.maariv.co.il/103fm/playlist.m3u8\")",
+      "Bash(curl -I \"https://glzwizzlv.bynetcdn.com/glz_mp3\")",
+      "WebFetch(domain:103fm.maariv.co.il)",
+      "Bash(curl -I -H \"Referer: https://103fm.maariv.co.il/\" \"https://cdn.cybercdn.live/103FM/Live/icecast.audio\")",
+      "Bash(git add *)",
+      "Bash(git commit -m 'Update 103FM stream URL to working endpoint *)",
+      "Bash(sbatch *)",
+      "Bash(squeue *)",
+      "Bash(scancel 17274313)"
     ]
   }
 }

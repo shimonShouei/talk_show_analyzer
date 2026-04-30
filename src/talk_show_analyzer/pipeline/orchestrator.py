@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from talk_show_analyzer.config import settings
 from talk_show_analyzer.db import get_session
-from talk_show_analyzer.models import Episode, PipelineRun, Station
+from talk_show_analyzer.models import Episode, PipelineRun, Station, Segment
 from talk_show_analyzer.recorder import record_station
 from talk_show_analyzer.transcription import Transcriber
 from talk_show_analyzer.analysis import (
@@ -165,9 +165,9 @@ class PipelineOrchestrator:
                     session.query(Episode)
                     .filter_by(id=episode_id)
                     .options(
-                        joinedload(Episode.segments).joinedload("topics"),
-                        joinedload(Episode.segments).joinedload("guest_appearances"),
-                        joinedload(Episode.segments).joinedload("sentiments"),
+                        joinedload(Episode.segments).joinedload(Segment.topics),
+                        joinedload(Episode.segments).joinedload(Segment.guest_appearances),
+                        joinedload(Episode.segments).joinedload(Segment.sentiments),
                     )
                     .first()
                 )
@@ -281,9 +281,9 @@ class PipelineOrchestrator:
                     session.query(Episode)
                     .filter_by(id=episode_id)
                     .options(
-                        joinedload(Episode.segments).joinedload("topics"),
-                        joinedload(Episode.segments).joinedload("guest_appearances"),
-                        joinedload(Episode.segments).joinedload("sentiments"),
+                        joinedload(Episode.segments).joinedload(Segment.topics),
+                        joinedload(Episode.segments).joinedload(Segment.guest_appearances),
+                        joinedload(Episode.segments).joinedload(Segment.sentiments),
                     )
                     .first()
                 )

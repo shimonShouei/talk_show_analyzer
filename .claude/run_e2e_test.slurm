@@ -69,16 +69,16 @@ logger.info("=" * 70)
 logger.info("Step 2: Running full pipeline")
 logger.info("=" * 70 + "\n")
 logger.info("Timeline:")
-logger.info("  - Record: 5 min of audio (real-time)")
-logger.info("  - Transcribe: Faster-Whisper + Pyannote (2-3 min on RTX 3090)")
-logger.info("  - Analyze: Topics, guests, sentiment (2-3 min with Claude API)")
-logger.info("  - Store: Persist to PostgreSQL\n")
+logger.info("  - Record: 20 min of audio (real-time)")
+logger.info("  - Transcribe: Faster-Whisper + Pyannote (4-5 min on RTX 3090)")
+logger.info("  - Analyze: Topics, guests, sentiment (3-5 min with Claude API)")
+logger.info("  - Store: Persist to SQLite\n")
 
 try:
     orchestrator = PipelineOrchestrator()
     episode = orchestrator.run(
         station="galatz",
-        duration_seconds=300,  # 5 minutes
+        duration_seconds=1200,  # 20 minutes
         output_dir=output_dir,
     )
 

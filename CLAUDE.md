@@ -40,6 +40,17 @@ sbatch .claude/run_gpu_test.slurm
 python test_gpu_setup.py
 ```
 
+**Database configuration:**
+```bash
+# Local testing (default in .env.example — SQLite, no server needed)
+DATABASE_URL=sqlite:///./talk_show.db
+
+# Production (when PostgreSQL is available)
+DATABASE_URL=postgresql://user:password@db-host/talk_show_analyzer
+```
+
+⚠️ **Database setup**: `.env` is in `.gitignore` and must be created locally. For SLURM jobs, use SQLite (`sqlite:///./talk_show.db`) since compute nodes cannot easily reach external database servers. For production, switch to PostgreSQL and ensure the database server is accessible from the cluster.
+
 **Code quality:**
 ```bash
 black src/
@@ -109,6 +120,8 @@ scancel <JOBID>
 
 **Logging**: Project uses `loguru` (not stdlib). All modules import `logger` from loguru.
 
+**Database connectivity**: SQLAlchemy supports both SQLite and PostgreSQL. For local development and SLURM testing, use SQLite (`sqlite:///./talk_show.db`); it creates a local `.db` file with no server. For production, PostgreSQL provides persistence and concurrency but requires network access — on SLURM, ensure the database server hostname is resolvable from compute nodes or use SQLite as a fallback. The database URL is configured via `.env`, which is gitignored and must be created per environment.
+
 ## Codebase Maturity
 
 ✅ Transcription + diarization v4 (working — Pyannote community model)
@@ -116,7 +129,7 @@ scancel <JOBID>
 ✅ SLURM job submission (working — `.claude/run_gpu_test.slurm`)
 ✅ Analysis modules (working — Claude Sonnet for segmentation/topics/guests/sentiment)
 ✅ Pipeline orchestration (working — full E2E with checkpoint recovery)
-✅ Database layer (working — PostgreSQL with SQLAlchemy ORM + Alembic migrations)
+✅ Database layer (working — SQLAlchemy with SQLite for testing, PostgreSQL for production)
 ✅ Dashboard (working — Streamlit multi-page with 5 analysis views)
 ⏳ Daily automation (TODO — CLI + SLURM job for 3 stations in parallel)
 ⏳ Political leaning (TODO — Claude Opus classifier with Israeli context)
