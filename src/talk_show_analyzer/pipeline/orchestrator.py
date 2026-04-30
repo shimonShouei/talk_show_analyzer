@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from loguru import logger
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from talk_show_analyzer.config import settings
 from talk_show_analyzer.db import get_session
@@ -42,7 +42,10 @@ class PipelineOrchestrator:
 
     def __init__(self):
         """Initialize orchestrator."""
-        self.transcriber = Transcriber()
+        self.transcriber = Transcriber(
+            device=settings.whisper_device,
+            compute_type=settings.whisper_compute_type,
+        )
         self.segmenter = Segmenter()
         self.topic_extractor = TopicExtractor()
         self.guest_identifier = GuestIdentifier()
@@ -156,9 +159,19 @@ class PipelineOrchestrator:
             logger.info("✓ PIPELINE COMPLETE")
             logger.info(f"{'='*60}\n")
 
-            # Fetch and return updated episode
+            # Fetch and return updated episode with relationships eagerly loaded
             with get_session() as session:
-                return session.query(Episode).filter_by(id=episode_id).first()
+                episode = (
+                    session.query(Episode)
+                    .filter_by(id=episode_id)
+                    .options(
+                        joinedload(Episode.segments).joinedload("topics"),
+                        joinedload(Episode.segments).joinedload("guest_appearances"),
+                        joinedload(Episode.segments).joinedload("sentiments"),
+                    )
+                    .first()
+                )
+                return episode
 
         except Exception as e:
             logger.error(f"\n✗ PIPELINE FAILED: {e}")
@@ -264,7 +277,17 @@ class PipelineOrchestrator:
             logger.info("✓ Resume completed")
 
             with get_session() as session:
-                return session.query(Episode).filter_by(id=episode_id).first()
+                episode = (
+                    session.query(Episode)
+                    .filter_by(id=episode_id)
+                    .options(
+                        joinedload(Episode.segments).joinedload("topics"),
+                        joinedload(Episode.segments).joinedload("guest_appearances"),
+                        joinedload(Episode.segments).joinedload("sentiments"),
+                    )
+                    .first()
+                )
+                return episode
 
         except Exception as e:
             logger.error(f"Resume failed: {e}")
