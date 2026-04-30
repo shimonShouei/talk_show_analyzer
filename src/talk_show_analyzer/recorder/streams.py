@@ -32,9 +32,9 @@ STREAMS = {
     ),
     "103fm": StreamInfo(
         name="103FM (103 FM)",
-        url="https://stream.103fm.maariv.co.il/103fm/playlist.m3u8",
+        url="https://cdn.cybercdn.live/103FM/Live/icecast.audio",
         referer="https://103fm.maariv.co.il/",
-        format="hls",
+        format="mp3",
     ),
 }
 
