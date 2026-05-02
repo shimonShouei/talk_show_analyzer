@@ -20,6 +20,7 @@ from talk_show_analyzer.analysis import (
     SentimentAnalyzer,
     aggregate_ads,
 )
+from talk_show_analyzer.identification import LLMSpeakerIdentifier
 from talk_show_analyzer.transcription.transcriber import (
     TranscriptionResult,
     SpeakerSegment,
@@ -33,6 +34,7 @@ class PipelineOrchestrator:
     STEPS = [
         "record",
         "transcribe",
+        "identify_speakers",
         "segment",
         "topics",
         "guests",
@@ -46,6 +48,7 @@ class PipelineOrchestrator:
             device=settings.whisper_device,
             compute_type=settings.whisper_compute_type,
         )
+        self.speaker_identifier = LLMSpeakerIdentifier()
         self.segmenter = Segmenter()
         self.topic_extractor = TopicExtractor()
         self.guest_identifier = GuestIdentifier()
@@ -113,7 +116,14 @@ class PipelineOrchestrator:
                 lambda: self._step_transcribe(audio_path),
             )
 
-            # Step 3: Segment
+            # Step 3: Identify speakers
+            speaker_identities = self._run_step_with_checkpoint(
+                episode_id,
+                "identify_speakers",
+                lambda: self._step_identify_speakers(transcript, episode_id),
+            )
+
+            # Step 4: Segment
             segments = self._run_step_with_checkpoint(
                 episode_id,
                 "segment",
@@ -229,20 +239,27 @@ class PipelineOrchestrator:
         # Continue from where we left off
         try:
             if not last_done or last_done == "transcribe":
+                speaker_identities = self._run_step_with_checkpoint(
+                    episode_id,
+                    "identify_speakers",
+                    lambda: self._step_identify_speakers(transcript, episode_id),
+                )
+
+            if not last_done or last_done in ["transcribe", "identify_speakers"]:
                 segments = self._run_step_with_checkpoint(
                     episode_id,
                     "segment",
                     lambda: self._step_segment(transcript),
                 )
 
-            if not last_done or last_done in ["transcribe", "segment"]:
+            if not last_done or last_done in ["transcribe", "identify_speakers", "segment"]:
                 topic_analyses = self._run_step_with_checkpoint(
                     episode_id,
                     "topics",
                     lambda: self._step_topics(segments),
                 )
 
-            if not last_done or last_done in ["transcribe", "segment", "topics"]:
+            if not last_done or last_done in ["transcribe", "identify_speakers", "segment", "topics"]:
                 guest_analyses = self._run_step_with_checkpoint(
                     episode_id,
                     "guests",
@@ -251,6 +268,7 @@ class PipelineOrchestrator:
 
             if not last_done or last_done in [
                 "transcribe",
+                "identify_speakers",
                 "segment",
                 "topics",
                 "guests",
@@ -400,6 +418,18 @@ class PipelineOrchestrator:
             language="he",
         )
         return transcript
+
+    def _step_identify_speakers(
+        self, transcript: TranscriptionResult, episode_id: int
+    ) -> dict:
+        """Identify speakers in the transcript."""
+        logger.info("Identifying speakers...")
+        with get_session() as session:
+            speaker_identities = self.speaker_identifier.identify_speakers(
+                transcript, episode_id, session
+            )
+            session.commit()
+        return speaker_identities
 
     def _step_segment(self, transcript: TranscriptionResult) -> list:
         """Segment transcript."""

@@ -238,6 +238,67 @@ class PipelineRun(Base):
         return f"<PipelineRun episode={self.episode_id} step={self.step} status={self.status}>"
 
 
+class Person(Base):
+    """Canonical identity (host, guest, or other speaker)."""
+
+    __tablename__ = "persons"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name_he: Mapped[str] = mapped_column(String(255), nullable=False)
+    name_en: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    role: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="unknown"
+    )  # "host" | "guest" | "caller" | "unknown"
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    speaker_identities: Mapped[List["SpeakerIdentity"]] = relationship(
+        "SpeakerIdentity", back_populates="person", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("idx_person_name_en", "name_en"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Person {self.name_en} ({self.role})>"
+
+
+class SpeakerIdentity(Base):
+    """Resolved (Episode, diarization-cluster) → Person mapping."""
+
+    __tablename__ = "speaker_identities"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    episode_id: Mapped[int] = mapped_column(ForeignKey("episodes.id"), nullable=False)
+    speaker_label: Mapped[str] = mapped_column(
+        String(50), nullable=False
+    )  # GLOBAL_00 etc.
+    person_id: Mapped[int | None] = mapped_column(ForeignKey("persons.id"), nullable=True)
+    role: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="unknown"
+    )  # host | guest | caller | unknown
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    method: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="unresolved"
+    )  # llm | llm_confident | unresolved
+    evidence: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    # Relationships
+    episode: Mapped["Episode"] = relationship("Episode")
+    person: Mapped["Person | None"] = relationship("Person", back_populates="speaker_identities")
+
+    __table_args__ = (
+        Index("idx_speaker_identity_episode", "episode_id"),
+        Index("idx_speaker_identity_label", "episode_id", "speaker_label"),
+    )
+
+    def __repr__(self) -> str:
+        person_str = self.person.name_en if self.person else "Unknown"
+        return f"<SpeakerIdentity ep={self.episode_id} {self.speaker_label}->{person_str} conf={self.confidence:.2f}>"
+
+
 __all__ = [
     "Base",
     "Station",
@@ -248,4 +309,6 @@ __all__ = [
     "GuestAppearance",
     "SentimentResult",
     "PipelineRun",
+    "Person",
+    "SpeakerIdentity",
 ]
