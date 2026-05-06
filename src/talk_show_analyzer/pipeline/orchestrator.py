@@ -16,11 +16,10 @@ from talk_show_analyzer.transcription import Transcriber
 from talk_show_analyzer.analysis import (
     Segmenter,
     TopicExtractor,
-    GuestIdentifier,
     SentimentAnalyzer,
     aggregate_ads,
 )
-from talk_show_analyzer.identification import LLMSpeakerIdentifier
+from talk_show_analyzer.identification import UnifiedSpeakerIdentifier
 from talk_show_analyzer.transcription.transcriber import (
     TranscriptionResult,
     SpeakerSegment,
@@ -34,13 +33,15 @@ class PipelineOrchestrator:
     STEPS = [
         "record",
         "transcribe",
-        "identify_speakers",
         "segment",
+        "identify_speakers",
         "topics",
-        "guests",
         "sentiment",
         "store",
     ]
+
+    # Segment types treated as non-content (filtered before analysis)
+    AD_TYPES = {"ad", "jingle", "music"}
 
     def __init__(self):
         """Initialize orchestrator."""
@@ -48,10 +49,9 @@ class PipelineOrchestrator:
             device=settings.whisper_device,
             compute_type=settings.whisper_compute_type,
         )
-        self.speaker_identifier = LLMSpeakerIdentifier()
         self.segmenter = Segmenter()
+        self.speaker_identifier = UnifiedSpeakerIdentifier()
         self.topic_extractor = TopicExtractor()
-        self.guest_identifier = GuestIdentifier()
         self.sentiment_analyzer = SentimentAnalyzer()
 
     def run(
@@ -116,32 +116,31 @@ class PipelineOrchestrator:
                 lambda: self._step_transcribe(audio_path),
             )
 
-            # Step 3: Identify speakers
-            speaker_identities = self._run_step_with_checkpoint(
-                episode_id,
-                "identify_speakers",
-                lambda: self._step_identify_speakers(transcript, episode_id),
-            )
-
-            # Step 4: Segment
+            # Step 3: Segment (before speaker ID so ads can be filtered)
             segments = self._run_step_with_checkpoint(
                 episode_id,
                 "segment",
                 lambda: self._step_segment(transcript),
             )
 
-            # Step 4: Topics
+            content_segments = [s for s in segments if s.type not in self.AD_TYPES]
+            logger.info(
+                f"Filtered to {len(content_segments)}/{len(segments)} content segments "
+                f"(excluded: {len(segments) - len(content_segments)} ad/jingle/music)"
+            )
+
+            # Step 4: Identify speakers using cross-speaker name mentions
+            speaker_identities = self._run_step_with_checkpoint(
+                episode_id,
+                "identify_speakers",
+                lambda: self._step_identify_speakers(transcript, content_segments, episode_id),
+            )
+
+            # Step 5: Topics
             topic_analyses = self._run_step_with_checkpoint(
                 episode_id,
                 "topics",
-                lambda: self._step_topics(segments),
-            )
-
-            # Step 5: Guests
-            guest_analyses = self._run_step_with_checkpoint(
-                episode_id,
-                "guests",
-                lambda: self._step_guests(segments),
+                lambda: self._step_topics(content_segments),
             )
 
             # Step 6: Sentiment
@@ -151,7 +150,7 @@ class PipelineOrchestrator:
                 lambda: self._step_sentiment(topic_analyses),
             )
 
-            # Step 7: Ads
+            # Step 7: Store
             ads_report = self._run_step_with_checkpoint(
                 episode_id,
                 "store",
@@ -160,7 +159,6 @@ class PipelineOrchestrator:
                     transcript,
                     segments,
                     topic_analyses,
-                    guest_analyses,
                     sentiment_analyses,
                 ),
             )
@@ -239,40 +237,29 @@ class PipelineOrchestrator:
         # Continue from where we left off
         try:
             if not last_done or last_done == "transcribe":
-                speaker_identities = self._run_step_with_checkpoint(
-                    episode_id,
-                    "identify_speakers",
-                    lambda: self._step_identify_speakers(transcript, episode_id),
-                )
-
-            if not last_done or last_done in ["transcribe", "identify_speakers"]:
                 segments = self._run_step_with_checkpoint(
                     episode_id,
                     "segment",
                     lambda: self._step_segment(transcript),
                 )
 
-            if not last_done or last_done in ["transcribe", "identify_speakers", "segment"]:
+            content_segments = [s for s in segments if s.type not in self.AD_TYPES]
+
+            if not last_done or last_done in ["transcribe", "segment"]:
+                speaker_identities = self._run_step_with_checkpoint(
+                    episode_id,
+                    "identify_speakers",
+                    lambda: self._step_identify_speakers(transcript, content_segments, episode_id),
+                )
+
+            if not last_done or last_done in ["transcribe", "segment", "identify_speakers"]:
                 topic_analyses = self._run_step_with_checkpoint(
                     episode_id,
                     "topics",
-                    lambda: self._step_topics(segments),
+                    lambda: self._step_topics(content_segments),
                 )
 
-            if not last_done or last_done in ["transcribe", "identify_speakers", "segment", "topics"]:
-                guest_analyses = self._run_step_with_checkpoint(
-                    episode_id,
-                    "guests",
-                    lambda: self._step_guests(segments),
-                )
-
-            if not last_done or last_done in [
-                "transcribe",
-                "identify_speakers",
-                "segment",
-                "topics",
-                "guests",
-            ]:
+            if not last_done or last_done in ["transcribe", "segment", "identify_speakers", "topics"]:
                 sentiment_analyses = self._run_step_with_checkpoint(
                     episode_id,
                     "sentiment",
@@ -287,7 +274,6 @@ class PipelineOrchestrator:
                     transcript,
                     segments,
                     topic_analyses,
-                    guest_analyses,
                     sentiment_analyses,
                 ),
             )
@@ -419,32 +405,27 @@ class PipelineOrchestrator:
         )
         return transcript
 
+    def _step_segment(self, transcript: TranscriptionResult) -> list:
+        """Segment transcript into content types (including ads)."""
+        logger.info("Segmenting transcript...")
+        return self.segmenter.segment(transcript)
+
     def _step_identify_speakers(
-        self, transcript: TranscriptionResult, episode_id: int
+        self, transcript: TranscriptionResult, content_segments: list, episode_id: int
     ) -> dict:
-        """Identify speakers in the transcript."""
+        """Identify all speakers using cross-speaker name mentions in non-ad segments."""
         logger.info("Identifying speakers...")
         with get_session() as session:
             speaker_identities = self.speaker_identifier.identify_speakers(
-                transcript, episode_id, session
+                transcript, content_segments, episode_id, session
             )
             session.commit()
         return speaker_identities
 
-    def _step_segment(self, transcript: TranscriptionResult) -> list:
-        """Segment transcript."""
-        logger.info("Segmenting transcript...")
-        return self.segmenter.segment(transcript)
-
-    def _step_topics(self, segments: list) -> list:
-        """Extract topics."""
+    def _step_topics(self, content_segments: list) -> list:
+        """Extract topics from non-ad segments."""
         logger.info("Extracting topics...")
-        return self.topic_extractor.extract_topics(segments)
-
-    def _step_guests(self, segments: list) -> list:
-        """Identify guests."""
-        logger.info("Identifying guests...")
-        return self.guest_identifier.identify_guests(segments)
+        return self.topic_extractor.extract_topics(content_segments)
 
     def _step_sentiment(self, topic_analyses: list) -> list:
         """Analyze sentiment."""
@@ -457,7 +438,6 @@ class PipelineOrchestrator:
         transcript: TranscriptionResult,
         segments: list,
         topic_analyses: list,
-        guest_analyses: list,
         sentiment_analyses: list,
     ) -> dict:
         """Store results to database."""
@@ -476,7 +456,6 @@ class PipelineOrchestrator:
                 episode,
                 segments,
                 topic_analyses,
-                guest_analyses,
                 sentiment_analyses,
                 ads_report.ad_count,
                 ads_report.ad_percentage,

@@ -39,9 +39,10 @@ st.markdown("""
 
 ### Available Pages
 
-- **📊 Overview** — Daily summary with key metrics, top guests, trending topics
+- **📊 Overview** — Daily summary with key metrics, top speakers, trending topics
 - **📺 Episodes** — View all recorded episodes with detailed filtering and statistics
-- **👥 Guest Leaderboard** — Track guest appearances and frequency
+- **💬 Conversation** — Read the identified transcript: Name1: "..." Name2: "..."
+- **👥 Speaker Leaderboard** — Track speaker appearances and frequency
 - **🎯 Topics** — Analyze trending topics and their sentiment over time
 - **💭 Sentiment** — Detailed sentiment analysis by speaker and tone
 

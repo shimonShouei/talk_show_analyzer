@@ -7,7 +7,7 @@ from talk_show_analyzer.dashboard.utils import (
     get_top_guests,
 )
 
-st.title("👥 Guest Leaderboard")
+st.title("👥 Speaker Leaderboard")
 st.markdown("---")
 
 col1, col2, col3 = st.columns(3)
@@ -39,11 +39,11 @@ if guests:
     col1, col2 = st.columns([2, 1])
 
     with col1:
-        st.subheader(f"Top {len(guests)} Guests")
-        guests_df_display = guests_df[["name", "title", "appearances"]].rename(
+        st.subheader(f"Top {len(guests)} Speakers")
+        guests_df_display = guests_df[["name", "role", "appearances"]].rename(
             columns={
-                "name": "Guest",
-                "title": "Title",
+                "name": "Speaker",
+                "role": "Role",
                 "appearances": "Appearances",
             }
         )
@@ -51,9 +51,8 @@ if guests:
 
     with col2:
         st.subheader("Statistics")
-        col1a, col1b = st.columns(1)
-        with col1a:
-            st.metric("Total Guests", len(guests))
+        with col2:
+            st.metric("Total Speakers", len(guests))
             st.metric(
                 "Average Appearances",
                 f"{guests_df['appearances'].mean():.1f}"
@@ -74,9 +73,9 @@ if guests:
 
     st.subheader("Guest Details")
     selected_guest = st.selectbox(
-        "Select guest",
+        "Select speaker",
         options=range(len(guests)),
-        format_func=lambda i: f"{guests[i]['name']} ({guests[i]['title']})",
+        format_func=lambda i: f"{guests[i]['name']} ({guests[i]['role']})",
     )
 
     if selected_guest is not None:
@@ -88,10 +87,10 @@ if guests:
             st.metric("Hebrew", guest["name_he"])
 
         with col2:
-            st.metric("Title", guest["title"])
+            st.metric("Role", guest["role"])
 
         with col3:
             st.metric("Total Appearances", guest["appearances"])
 
 else:
-    st.info("No guest data found")
+    st.info("No identified speakers found. Run the pipeline to populate speaker data.")

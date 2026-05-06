@@ -93,8 +93,8 @@ with col1:
     guests = get_top_guests(station_id=station_id, days=days, limit=10)
     if guests:
         guest_df = pd.DataFrame(guests)
-        guest_df = guest_df[["name", "title", "appearances"]].rename(
-            columns={"name": "Guest", "title": "Title", "appearances": "Appearances"}
+        guest_df = guest_df[["name", "role", "appearances"]].rename(
+            columns={"name": "Speaker", "role": "Role", "appearances": "Appearances"}
         )
         st.dataframe(guest_df, use_container_width=True, hide_index=True)
     else:

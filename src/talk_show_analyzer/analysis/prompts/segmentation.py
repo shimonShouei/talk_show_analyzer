@@ -41,7 +41,8 @@ Return a JSON array. Each segment must have:
 - `start` and `end` must be floats (in seconds) based on the [start - end] format given
 - Segments should NOT overlap
 - If a speaker changes, it's likely a segment boundary (unless still same topic)
-- Merge short segments (<5s) with adjacent same-type segments
+- Ads can be as short as 30 seconds — do NOT merge them with adjacent content
+- Merge only non-ad segments shorter than 10s with adjacent same-type segments
 
 Return ONLY valid JSON array. No additional text."""
 

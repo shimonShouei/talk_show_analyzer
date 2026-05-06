@@ -30,9 +30,9 @@ class Segment:
 class Segmenter:
     """Segment transcript into logical content types using Claude."""
 
-    WINDOW_SIZE_SECONDS = 20 * 60  # 20 minutes
-    OVERLAP_SECONDS = 2 * 60  # 2 minutes
-    MERGE_GAP_SECONDS = 30  # merge same-type segments < 30s apart
+    WINDOW_SIZE_SECONDS = 5 * 60  # 5 minutes — tight enough to catch 30s ads
+    OVERLAP_SECONDS = 60  # 1 minute
+    MERGE_GAP_SECONDS = 15  # merge same-type segments < 15s apart
 
     def __init__(self, model: str = "claude-haiku-4-5-20251001"):
         """Initialize segmenter.
