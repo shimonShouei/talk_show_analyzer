@@ -6,20 +6,47 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 import anthropic
+import numpy as np
 from loguru import logger
+from sklearn.cluster import AgglomerativeClustering
 from sqlalchemy.orm import Session
 
 from talk_show_analyzer.config import settings
 from talk_show_analyzer.models import Person, SpeakerIdentity
-from talk_show_analyzer.transcription.transcriber import TranscriptionResult
+from talk_show_analyzer.transcription.transcriber import (
+    SpeakerSegment,
+    TranscriptionResult,
+)
 
 # Max characters of utterances to include per speaker to keep prompt manageable
 _MAX_CHARS_PER_SPEAKER = 3000
-# Max total segments from the transcript to use as cross-speaker context
-_MAX_CONTEXT_SEGMENTS = 80
+# Fallback head-of-show segment count when naming-moment scan returns nothing
+_FALLBACK_HEAD_SEGMENTS = 20
+
+# Hebrew high-signal markers for naming moments. Each pattern is a substring.
+HEBREW_NAMING_PATTERNS = [
+    # Greetings — host welcoming a guest by name
+    "שלום ל",
+    "ברוך הבא",
+    "ברוכה הבאה",
+    "ערב טוב",
+    "בוקר טוב",
+    # Titles — typically precede a name
+    "פרופסור",
+    "דוקטור",
+    'ד"ר',
+    "הכתב",
+    "הכתבת",
+    "שר ",
+    "שרת ",
+    # Direct address phrasing
+    "מה דעתך",
+    "תגיד ",
+    "תגידי ",
+]
 
 SYSTEM_PROMPT = """You are analyzing a Hebrew radio talk show transcript. Each speaker is labeled
-SPEAKER_00, SPEAKER_01, etc. by an automatic diarization system.
+SPEAKER_NN by an automatic diarization system (acoustically deduplicated before you see it).
 
 Your task: identify who each speaker really is, using ONLY evidence found in the transcript itself.
 
@@ -32,17 +59,32 @@ Look for patterns like:
 - "עם X מ-Y" (with X from Y) — guest introduction
 - Any explicit name address between speakers
 
+ANCHOR vs GUEST — structural roles you can use to disambiguate:
+- The ANCHOR (host) asks ~50% of all questions, takes short turns, and bookends segments
+  (opens, hands off, returns to wrap up). Hosts rarely speak in extended monologues.
+- The GUEST takes significantly longer turns (narrative/expert function) and answers far more
+  than they ask. An expert guest is typically introduced once with a title (פרופסור, ד"ר,
+  הכתב) and then carries the explanation.
+- A CALLER appears briefly, is greeted by the host ("שלום X מ-Y"), speaks once or twice, exits.
+
+CONFIDENCE TIERS — apply strictly:
+- 0.9+: an explicit named greeting or self-introduction is in the transcript
+  (e.g. "ברוך הבא פרופסור כהן" → that speaker is Prof. Cohen).
+- 0.7-0.89: consistent direct address by the host across multiple turns, or a strong
+  title+answer pattern, but no single explicit naming moment.
+- below 0.7: do NOT guess. Return Unknown. Hallucinated names are worse than gaps.
+
 IMPORTANT:
-- Only assign names when you find EXPLICIT textual evidence in the transcript
-- A speaker can be identified from what OTHERS say TO them, not just what they say themselves
-- If no name is found for a speaker, return "Unknown"
-- Hosts typically speak the most and ask questions; guests typically answer; callers are brief
-- Do NOT use any knowledge of who usually hosts which show"""
+- Only assign names when you find EXPLICIT textual evidence in the transcript.
+- A speaker can be identified from what OTHERS say TO them, not just what they say themselves.
+- If no name is found for a speaker, return "Unknown".
+- Do NOT use any prior knowledge of who usually hosts which show."""
 
-IDENTIFICATION_PROMPT = """Below is a sample of the transcript showing all speakers. Use cross-speaker
-name mentions to identify each speaker.
+IDENTIFICATION_PROMPT = """Below is a sample of the transcript focused on NAMING MOMENTS — segments
+containing greetings, titles, or direct address, plus a few segments of follow-up context after
+each one. Use cross-speaker name mentions to identify each speaker.
 
-TRANSCRIPT SAMPLE:
+TRANSCRIPT SAMPLE (naming moments):
 {transcript_sample}
 
 SPEAKER SUMMARIES (all their utterances):
@@ -55,15 +97,178 @@ For each speaker label found in the summaries, return a JSON array where each el
   "name_en": "Name in English or Unknown",
   "role": "host" | "guest" | "caller" | "unknown",
   "confidence": 0.0-1.0,
-  "evidence": "exact quote or address from the transcript that establishes the name, or empty string"
+  "evidence": "exact quote or address from the transcript that establishes the name, or empty string",
+  "reasoning": "1-2 sentence chain-of-thought explaining the mapping (e.g. 'SPEAKER_00 greeted SPEAKER_01 as Professor Cohen, and SPEAKER_01 then provided a long expert explanation, so SPEAKER_01 = Cohen and SPEAKER_00 is the host.')"
 }}
 
-Confidence guidelines:
-- 0.9+: Name is explicitly stated to/by this speaker in the transcript
-- 0.7-0.89: Strong contextual evidence (e.g. host greeting pattern, repeated address)
-- below 0.7: Uncertain — prefer Unknown over a guess
+Confidence rules (strict — Unknown is preferable to a guess):
+- 0.9+: name explicitly stated to/by this speaker (greeting or self-introduction)
+- 0.7-0.89: consistent host direct-address or title+answer pattern across multiple turns
+- below 0.7: return Unknown for this speaker
+
+Apply the ANCHOR vs GUEST heuristic: short, question-heavy, bookending turns → host;
+long, narrative, answer-heavy turns introduced with a title → guest.
 
 Return ONLY a valid JSON array, nothing else."""
+
+
+def _recover_partial_json(raw: str) -> list[dict]:
+    """Extract complete JSON objects from a truncated array response."""
+    objects = []
+    depth = 0
+    start = None
+    in_string = False
+    escape = False
+    for i, ch in enumerate(raw):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                try:
+                    objects.append(json.loads(raw[start : i + 1]))
+                except json.JSONDecodeError:
+                    pass
+                start = None
+    return objects
+
+
+def _label_sort_key(label: str) -> tuple[int, str]:
+    """Sort labels so 'SPEAKER_03' comes before 'SPEAKER_07' regardless of zero-padding.
+
+    Falls back to lexical ordering when no trailing number is present.
+    """
+    m = re.search(r"(\d+)$", label)
+    if m:
+        return (int(m.group(1)), label)
+    return (10**9, label)
+
+
+def _merge_speakers_acoustic(
+    embeddings: dict[str, np.ndarray],
+    threshold: float,
+) -> dict[str, str]:
+    """Cluster speaker embeddings; return {original_label -> canonical_label}.
+
+    Canonical = lowest-numbered original label per cluster (e.g. SPEAKER_03+07 → SPEAKER_03).
+    Labels without embeddings are not in the input dict; callers add identity entries for those.
+
+    Args:
+        embeddings: mapping of speaker label → 1D embedding vector.
+        threshold: cosine *similarity* above which two speakers are merged. Internally
+            converted to sklearn distance (1 - threshold).
+    """
+    labels = sorted(embeddings.keys(), key=_label_sort_key)
+    n = len(labels)
+    if n == 0:
+        return {}
+    if n == 1:
+        return {labels[0]: labels[0]}
+
+    matrix = np.stack([embeddings[lab] for lab in labels])
+    distance_threshold = max(1e-6, 1.0 - threshold)
+    clustering = AgglomerativeClustering(
+        n_clusters=None,
+        metric="cosine",
+        linkage="average",
+        distance_threshold=distance_threshold,
+    )
+    cluster_ids = clustering.fit_predict(matrix)
+
+    # Group originals by cluster id, then pick the lowest-numbered as canonical.
+    groups: dict[int, list[str]] = defaultdict(list)
+    for lab, cid in zip(labels, cluster_ids):
+        groups[int(cid)].append(lab)
+
+    mapping: dict[str, str] = {}
+    for members in groups.values():
+        members.sort(key=_label_sort_key)
+        canonical = members[0]
+        for lab in members:
+            mapping[lab] = canonical
+
+    n_canonical = len(groups)
+    logger.info(f"acoustic merge: {n} → {n_canonical} speakers")
+    return mapping
+
+
+def _extract_naming_moments(
+    transcript: TranscriptionResult,
+    label_map: dict[str, str],
+    content_labels: set[str],
+    context_n: int,
+    max_total: int,
+) -> list[SpeakerSegment]:
+    """Scan transcript for Hebrew naming patterns; return hit segment + next `context_n`.
+
+    Speaker labels in the returned segments are *post-merge* (rewritten via `label_map`).
+    Dedupes by (start, end, original_speaker). Caps total length at `max_total`.
+    Only segments whose original speaker is in `content_labels` are considered.
+    Falls back to the first `_FALLBACK_HEAD_SEGMENTS` content segments if no hits.
+    """
+    segs = transcript.segments
+    selected: list[SpeakerSegment] = []
+    seen: set[tuple[float, float, str]] = set()
+
+    def _emit(seg: SpeakerSegment) -> bool:
+        key = (seg.start, seg.end, seg.speaker)
+        if key in seen:
+            return False
+        if seg.speaker not in content_labels:
+            return False
+        seen.add(key)
+        rewritten = SpeakerSegment(
+            start=seg.start,
+            end=seg.end,
+            speaker=label_map.get(seg.speaker, seg.speaker),
+            text=seg.text,
+        )
+        selected.append(rewritten)
+        return True
+
+    for i, seg in enumerate(segs):
+        if seg.speaker not in content_labels:
+            continue
+        text = seg.text or ""
+        if not any(pat in text for pat in HEBREW_NAMING_PATTERNS):
+            continue
+        _emit(seg)
+        for j in range(i + 1, min(i + 1 + context_n, len(segs))):
+            _emit(segs[j])
+        if len(selected) >= max_total:
+            break
+
+    if not selected:
+        # Fallback: head of show — greetings frequently happen in the first minute.
+        head_count = 0
+        for seg in segs:
+            if seg.speaker not in content_labels:
+                continue
+            _emit(seg)
+            head_count += 1
+            if head_count >= _FALLBACK_HEAD_SEGMENTS:
+                break
+        logger.debug(
+            f"naming-moment scan: 0 hits, falling back to head-of-show "
+            f"({len(selected)} segments)"
+        )
+    else:
+        logger.debug(f"naming-moment scan: {len(selected)} context segments selected")
+
+    return selected[:max_total]
 
 
 @dataclass
@@ -85,9 +290,13 @@ class UnifiedSpeakerIdentifier:
     """
     Identify all speakers in a single Claude call using cross-speaker name mentions.
 
-    Unlike the old per-speaker approach, this sends all speakers together so Claude
-    can see that e.g. SPEAKER_00 addresses SPEAKER_01 as "פרופסור כהן" — which is
-    impossible to detect when analyzing each speaker in isolation.
+    Pipeline (per episode):
+      1. Acoustic merge — collapse over-segmented pyannote labels via cosine clustering.
+      2. Naming-moment extraction — focus the LLM context on greetings/titles/direct-address.
+      3. Single Claude call — emit per-speaker JSON with explicit reasoning.
+      4. Strict confidence — names below 0.7 are dropped to Unknown.
+      5. Per-original persistence — each merged-from label gets its own SpeakerIdentity row
+         pointing at the same Person, so downstream code keyed on original labels still works.
     """
 
     def __init__(self, model: str = "claude-sonnet-4-6"):
@@ -101,14 +310,12 @@ class UnifiedSpeakerIdentifier:
         episode_id: int,
         session: Session,
     ) -> dict[str, ResolvedSpeaker]:
-        """
-        Identify all speakers in one unified Claude call.
+        """Identify all speakers in one unified Claude call.
 
-        Uses only utterances from non-ad content segments to avoid letting
-        commercial voice-overs pollute the speaker pool.
-
-        Returns:
-            Dict mapping speaker_label -> ResolvedSpeaker
+        Uses only utterances from non-ad content segments to avoid letting commercial
+        voice-overs pollute the speaker pool. Returns a dict keyed by ORIGINAL speaker
+        labels (pre-merge) so downstream consumers (orchestrator, dashboard, store) keep
+        working against the labels stored in `content_segments`.
         """
         logger.info("Identifying speakers via unified cross-speaker analysis...")
 
@@ -122,15 +329,47 @@ class UnifiedSpeakerIdentifier:
             logger.warning("No content-segment speakers found — skipping identification")
             return {}
 
-        # Group transcript segments by speaker (content only)
+        # ---- Acoustic merge ----
+        # Restrict embedding domain to content speakers, then cluster.
+        content_embeddings = {
+            label: emb
+            for label, emb in transcript.speaker_embeddings.items()
+            if label in content_speaker_labels
+        }
+        if settings.acoustic_merge_enabled and len(content_embeddings) >= 2:
+            label_map = _merge_speakers_acoustic(
+                content_embeddings, settings.acoustic_merge_threshold
+            )
+        else:
+            if not content_embeddings:
+                logger.warning(
+                    "No speaker embeddings available — skipping acoustic merge "
+                    "(diarization may have fallen back to single-speaker mode)"
+                )
+            label_map = {}
+
+        # Pass-through identity entries for content labels without embeddings.
+        for label in content_speaker_labels:
+            label_map.setdefault(label, label)
+
+        # Inverse map: canonical label → list of original labels (sorted).
+        merged_to_originals: dict[str, list[str]] = defaultdict(list)
+        for original, canonical in label_map.items():
+            merged_to_originals[canonical].append(original)
+        for canonical in merged_to_originals:
+            merged_to_originals[canonical].sort(key=_label_sort_key)
+
+        # ---- Group transcript segments by canonical speaker (content only) ----
         speaker_utterances: dict[str, list] = defaultdict(list)
         for ts in transcript.segments:
-            if ts.speaker in content_speaker_labels:
-                speaker_utterances[ts.speaker].append(ts)
+            if ts.speaker not in content_speaker_labels:
+                continue
+            canonical = label_map[ts.speaker]
+            speaker_utterances[canonical].append(ts)
 
-        # Build per-speaker summaries (truncated)
+        # ---- Build per-canonical-speaker summaries (truncated) ----
         speaker_summaries = []
-        for label in sorted(speaker_utterances.keys()):
+        for label in sorted(speaker_utterances.keys(), key=_label_sort_key):
             segs = speaker_utterances[label]
             total_chars = 0
             lines = []
@@ -140,16 +379,23 @@ class UnifiedSpeakerIdentifier:
                     break
                 lines.append(line)
                 total_chars += len(line)
-            block = f"=== {label} ===\n" + "\n".join(lines)
+            originals = merged_to_originals.get(label, [label])
+            origin_note = (
+                f" (merged from: {', '.join(originals)})" if len(originals) > 1 else ""
+            )
+            block = f"=== {label}{origin_note} ===\n" + "\n".join(lines)
             speaker_summaries.append(block)
 
-        # Build a cross-speaker transcript sample (interleaved, up to limit)
-        content_ts_segs = [
-            ts for ts in transcript.segments if ts.speaker in content_speaker_labels
-        ]
-        sample_segs = content_ts_segs[:_MAX_CONTEXT_SEGMENTS]
+        # ---- Naming-moment focused transcript sample ----
+        moment_segs = _extract_naming_moments(
+            transcript,
+            label_map,
+            content_speaker_labels,
+            settings.naming_moment_context_segments,
+            settings.naming_moment_max_total,
+        )
         transcript_sample = "\n".join(
-            f"[{s.start:.0f}s] {s.speaker}: {s.text}" for s in sample_segs
+            f"[{s.start:.0f}s] {s.speaker}: {s.text}" for s in moment_segs
         )
 
         prompt = IDENTIFICATION_PROMPT.format(
@@ -158,11 +404,20 @@ class UnifiedSpeakerIdentifier:
         )
 
         try:
+            # Budget ~250 tokens per speaker object (now includes reasoning) + overhead
+            max_tokens = max(2048, len(merged_to_originals) * 250)
+
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=1500,
+                max_tokens=max_tokens,
                 temperature=0,
-                system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                system=[
+                    {
+                        "type": "text",
+                        "text": SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
                 messages=[{"role": "user", "content": prompt}],
             )
 
@@ -171,31 +426,55 @@ class UnifiedSpeakerIdentifier:
             raw = re.sub(r"^```(?:json)?\s*", "", raw)
             raw = re.sub(r"\s*```$", "", raw).strip()
 
-            data = json.loads(raw)
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as parse_err:
+                logger.warning(f"JSON parse failed ({parse_err}), attempting partial recovery")
+                data = _recover_partial_json(raw)
+                if data:
+                    logger.info(
+                        f"Partial recovery succeeded: {len(data)} speaker objects recovered"
+                    )
+                else:
+                    raise
 
-        except (json.JSONDecodeError, Exception) as e:
+        except Exception as e:
             logger.error(f"Unified speaker identification failed: {e}")
             data = []
 
-        # Build result map from Claude's response
+        # ---- Build result map and persist (one row per ORIGINAL label) ----
         results: dict[str, ResolvedSpeaker] = {}
-        identified_labels = set()
+        identified_originals: set[str] = set()
 
         for item in data:
-            label = item.get("speaker_label", "")
-            if not label:
+            canonical = item.get("speaker_label", "")
+            if not canonical:
                 continue
-            identified_labels.add(label)
+            if canonical not in merged_to_originals:
+                logger.warning(
+                    f"LLM returned label '{canonical}' not in merged speaker set — dropping"
+                )
+                continue
 
-            name_he = item.get("name_he", "Unknown") or "Unknown"
-            name_en = item.get("name_en", "Unknown") or "Unknown"
-            role = (item.get("role") or "unknown").lower()
+            name_he_raw = item.get("name_he", "Unknown") or "Unknown"
+            name_en_raw = item.get("name_en", "Unknown") or "Unknown"
+            role_raw = (item.get("role") or "unknown").lower()
             confidence = float(item.get("confidence", 0.0))
-            evidence = item.get("evidence", "")
+            evidence = item.get("evidence", "") or ""
+            reasoning = item.get("reasoning", "") or ""
 
-            # Persist to DB
+            # Strict confidence enforcement: anything below 0.7 → Unknown.
+            if confidence < 0.7 or name_en_raw == "Unknown":
+                name_he, name_en, role = "Unknown", "Unknown", "unknown"
+                method = "unresolved"
+            else:
+                name_he, name_en = name_he_raw, name_en_raw
+                role = role_raw
+                method = "llm_explicit" if confidence >= 0.9 else "llm_address"
+
+            # Persist Person once per cluster (shared across original labels).
             person_id = None
-            if name_en != "Unknown" and confidence >= 0.7:
+            if name_en != "Unknown":
                 person = session.query(Person).filter_by(name_en=name_en).first()
                 if not person:
                     person = Person(name_he=name_he, name_en=name_en, role=role)
@@ -203,32 +482,44 @@ class UnifiedSpeakerIdentifier:
                     session.flush()
                 person_id = person.id
 
-            method = "llm_confident" if confidence >= 0.7 else "unresolved"
-            identity = SpeakerIdentity(
-                episode_id=episode_id,
-                speaker_label=label,
-                person_id=person_id,
-                role=role,
-                confidence=confidence,
-                method=method,
-                evidence={"evidence_quote": evidence, "utterance_count": len(speaker_utterances.get(label, []))},
-            )
-            session.add(identity)
-            session.flush()
+            originals = merged_to_originals[canonical]
+            for original_label in originals:
+                identity = SpeakerIdentity(
+                    episode_id=episode_id,
+                    speaker_label=original_label,
+                    person_id=person_id,
+                    role=role,
+                    confidence=confidence,
+                    method=method,
+                    evidence={
+                        "evidence_quote": evidence,
+                        "reasoning": reasoning,
+                        "merged_from": originals,
+                        "canonical_label": canonical,
+                        "utterance_count": len(speaker_utterances.get(canonical, [])),
+                    },
+                )
+                session.add(identity)
+                session.flush()
 
-            resolved = ResolvedSpeaker(
-                speaker_label=label,
-                name_he=name_he,
-                name_en=name_en,
-                role=role,
-                confidence=confidence,
-                person_id=person_id,
-            )
-            results[label] = resolved
-            logger.info(f"  {label} -> {name_en} ({role}, conf={confidence:.2f})")
+                results[original_label] = ResolvedSpeaker(
+                    speaker_label=original_label,
+                    name_he=name_he,
+                    name_en=name_en,
+                    role=role,
+                    confidence=confidence,
+                    person_id=person_id,
+                )
+                identified_originals.add(original_label)
 
-        # Any content speaker Claude didn't return → store as unresolved
-        for label in content_speaker_labels - identified_labels:
+            merge_note = f" (merged from {len(originals)})" if len(originals) > 1 else ""
+            logger.info(
+                f"  {canonical}{merge_note} -> {name_en} ({role}, conf={confidence:.2f})"
+            )
+
+        # ---- Unresolved fill-in for any content speaker the LLM didn't return ----
+        for label in content_speaker_labels - identified_originals:
+            canonical = label_map.get(label, label)
             identity = SpeakerIdentity(
                 episode_id=episode_id,
                 speaker_label=label,
@@ -236,7 +527,10 @@ class UnifiedSpeakerIdentifier:
                 role="unknown",
                 confidence=0.0,
                 method="unresolved",
-                evidence={},
+                evidence={
+                    "merged_from": merged_to_originals.get(canonical, [label]),
+                    "canonical_label": canonical,
+                },
             )
             session.add(identity)
             session.flush()
@@ -249,8 +543,9 @@ class UnifiedSpeakerIdentifier:
             )
             logger.info(f"  {label} -> Unknown (not identified)")
 
+        identified_count = sum(1 for r in results.values() if r.name_en != "Unknown")
         logger.info(
-            f"Speaker identification complete: {sum(1 for r in results.values() if r.name_en != 'Unknown')} "
-            f"identified out of {len(results)} content speakers"
+            f"Speaker identification complete: {identified_count} identified out of "
+            f"{len(results)} content speakers ({len(merged_to_originals)} canonical)"
         )
         return results
