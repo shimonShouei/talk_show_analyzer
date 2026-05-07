@@ -16,7 +16,6 @@ Look for context clues:
 
 Return a JSON array of guests identified in this segment:
 
-```json
 [
   {
     "name_he": "שם בעברית",
@@ -27,7 +26,6 @@ Return a JSON array of guests identified in this segment:
     "confidence": 0.95
   }
 ]
-```
 
 ## Guidelines
 

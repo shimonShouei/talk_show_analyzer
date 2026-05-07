@@ -24,7 +24,6 @@ Rate sentiment on a scale of -1.0 to +1.0:
 
 Return a JSON array of sentiment analyses (one per speaker per topic):
 
-```json
 [
   {
     "speaker_label": "SPEAKER_00",
@@ -37,7 +36,6 @@ Return a JSON array of sentiment analyses (one per speaker per topic):
     ]
   }
 ]
-```
 
 ## Guidelines
 

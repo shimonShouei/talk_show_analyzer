@@ -108,6 +108,8 @@ class GuestIdentifier:
             )
 
             response_text = response.content[0].text.strip()
+            response_text = re.sub(r"^```(?:json)?\s*", "", response_text)
+            response_text = re.sub(r"\s*```$", "", response_text).strip()
 
             # Parse JSON
             try:
