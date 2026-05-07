@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     pyannote_device: str = "auto"  # cuda, cpu, auto
     pyannote_num_speakers: Optional[int] = None  # Auto-detect if None
 
+    # Speaker identification: acoustic merge + naming moments
+    acoustic_merge_enabled: bool = True
+    acoustic_merge_threshold: float = 0.7  # cosine similarity; sklearn distance = 1 - threshold
+    naming_moment_context_segments: int = 3
+    naming_moment_max_total: int = 60
+
     # HuggingFace token for Pyannote models
     hf_token: str = ""
 

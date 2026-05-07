@@ -26,9 +26,9 @@ STREAMS = {
     ),
     "kan_bet": StreamInfo(
         name="Kan Reshet Bet (ערוץ בית)",
-        url="https://kanlivep2event-i.akamaihd.net/hls/live/749624/749624/kanbet_mp3/chunklist.m3u8",
+        url="https://playerservices.streamtheworld.com/api/livestream-redirect/KAN_BET.mp3?dist=coolsite",
         referer="https://www.kan.org.il/",
-        format="hls",
+        format="mp3",
     ),
     "103fm": StreamInfo(
         name="103FM (103 FM)",
