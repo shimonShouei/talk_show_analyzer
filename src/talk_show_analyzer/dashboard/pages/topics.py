@@ -2,6 +2,7 @@
 
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 from talk_show_analyzer.dashboard.utils import (
     get_stations,
     get_topic_trends,
@@ -70,13 +71,17 @@ if topics:
 
     with col1:
         st.subheader("📊 Topic Frequency")
-        freq_data = topics_df[["topic", "count"]].set_index("topic").sort_values("count", ascending=False)
-        st.bar_chart(freq_data)
+        freq_data = topics_df[["topic", "count"]].sort_values("count", ascending=False)
+        fig = px.bar(freq_data, x="topic", y="count", labels={"topic": "", "count": "Mentions"})
+        fig.update_layout(xaxis=dict(tickangle=45, tickfont=dict(size=11)), margin=dict(b=120))
+        st.plotly_chart(fig, use_container_width=True)
 
     with col2:
         st.subheader("💭 Average Sentiment by Topic")
-        sentiment_data = topics_df[["topic", "avg_sentiment"]].set_index("topic").sort_values("avg_sentiment")
-        st.bar_chart(sentiment_data)
+        sentiment_data = topics_df[["topic", "avg_sentiment"]].sort_values("avg_sentiment")
+        fig = px.bar(sentiment_data, x="topic", y="avg_sentiment", labels={"topic": "", "avg_sentiment": "Avg Sentiment"})
+        fig.update_layout(xaxis=dict(tickangle=45, tickfont=dict(size=11)), margin=dict(b=120))
+        st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
 
@@ -90,7 +95,11 @@ if topics:
             st.write(f"• {cat}: {count}")
 
     with col2:
-        st.bar_chart(category_counts)
+        cat_df = category_counts.reset_index()
+        cat_df.columns = ["Category", "Count"]
+        fig = px.bar(cat_df, x="Category", y="Count", labels={"Category": ""})
+        fig.update_layout(xaxis=dict(tickangle=30, tickfont=dict(size=11)), margin=dict(b=80))
+        st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
 

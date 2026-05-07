@@ -2,6 +2,7 @@
 
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 from talk_show_analyzer.dashboard.utils import (
     get_stations,
     get_sentiment_stats,
@@ -81,15 +82,18 @@ if sentiment_stats["total"] > 0:
 
         with col2:
             st.subheader("Distribution by Tone")
-            st.bar_chart(
-                tone_df.set_index("tone")["count"].sort_values(ascending=False)
-            )
+            dist_df = tone_df[["tone", "count"]].sort_values("count", ascending=False)
+            fig = px.bar(dist_df, x="tone", y="count", labels={"tone": "", "count": "Count"})
+            fig.update_layout(xaxis=dict(tickangle=30, tickfont=dict(size=11)), margin=dict(b=80))
+            st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("---")
 
         st.subheader("Average Score by Tone")
-        score_data = tone_df[["tone", "avg_score"]].set_index("tone").sort_values("avg_score")
-        st.bar_chart(score_data)
+        score_df = tone_df[["tone", "avg_score"]].sort_values("avg_score")
+        fig = px.bar(score_df, x="tone", y="avg_score", labels={"tone": "", "avg_score": "Avg Score"})
+        fig.update_layout(xaxis=dict(tickangle=30, tickfont=dict(size=11)), margin=dict(b=80))
+        st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("---")
 

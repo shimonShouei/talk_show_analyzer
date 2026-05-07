@@ -2,6 +2,7 @@
 
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 from talk_show_analyzer.dashboard.utils import (
     get_stations,
     get_top_guests,
@@ -65,9 +66,10 @@ if guests:
     st.markdown("---")
 
     st.subheader("📊 Guest Appearance Distribution")
-    st.bar_chart(
-        guests_df.set_index("name")["appearances"].sort_values(ascending=False)
-    )
+    app_df = guests_df[["name", "appearances"]].sort_values("appearances", ascending=False)
+    fig = px.bar(app_df, x="name", y="appearances", labels={"name": "", "appearances": "Appearances"})
+    fig.update_layout(xaxis=dict(tickangle=40, tickfont=dict(size=11)), margin=dict(b=100))
+    st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
 
