@@ -1,11 +1,33 @@
-"""Analysis modules for talk show transcripts."""
+"""Analysis modules for talk show transcripts.
 
-from talk_show_analyzer.analysis.segmenter import Segment, Segmenter
-from talk_show_analyzer.analysis.topics import Topic, TopicAnalysis, TopicExtractor
-from talk_show_analyzer.analysis.sentiment import Sentiment, SentimentAnalysis, SentimentAnalyzer
-from talk_show_analyzer.analysis.ads import AdsReport, aggregate_ads
+The Thematic Intelligence pipeline (`ThematicAnalyzer`) is the active analyzer.
+The legacy `Segmenter` / `TopicExtractor` / `SentimentAnalyzer` modules remain
+exported for backwards compatibility (dashboard pages still read from the
+old tables) and will be removed in a follow-up.
+"""
+
+from talk_show_analyzer.analysis.legacy.segmenter import Segment, Segmenter
+from talk_show_analyzer.analysis.legacy.topics import Topic, TopicAnalysis, TopicExtractor
+from talk_show_analyzer.analysis.legacy.sentiment import (
+    Sentiment,
+    SentimentAnalysis,
+    SentimentAnalyzer,
+)
+from talk_show_analyzer.analysis.legacy.ads import AdsReport, aggregate_ads
+from talk_show_analyzer.analysis.thematic_analyzer import (
+    Entity,
+    EntityType,
+    HateSpeechIncident,
+    HateSpeechLevel,
+    SpeakerInsight,
+    Stance,
+    ThematicAnalyzer,
+    TopicAnalysis as ThematicTopicAnalysis,
+    TopicCategory,
+)
 
 __all__ = [
+    # Legacy (deprecated — will be removed once dashboard migrates)
     "Segment",
     "Segmenter",
     "Topic",
@@ -16,4 +38,14 @@ __all__ = [
     "SentimentAnalyzer",
     "AdsReport",
     "aggregate_ads",
+    # Thematic Intelligence pipeline
+    "ThematicAnalyzer",
+    "ThematicTopicAnalysis",
+    "Entity",
+    "EntityType",
+    "HateSpeechIncident",
+    "HateSpeechLevel",
+    "SpeakerInsight",
+    "Stance",
+    "TopicCategory",
 ]

@@ -6,11 +6,18 @@ from loguru import logger
 from talk_show_analyzer.analysis.segmenter import Segment
 from talk_show_analyzer.analysis.topics import TopicAnalysis
 from talk_show_analyzer.analysis.sentiment import SentimentAnalysis
+from talk_show_analyzer.analysis.thematic_analyzer import (
+    TopicAnalysis as ThematicTopicAnalysis,
+)
 from talk_show_analyzer.models import (
     Episode,
     Segment as SegmentModel,
     Topic as TopicModel,
     SentimentResult,
+    MergedTopic,
+    TopicEntity,
+    HateSpeechIncidentORM,
+    SpeakerInsightORM,
 )
 
 
@@ -111,4 +118,86 @@ def store_episode_results(
         f"✓ Stored results for episode {episode.id}: "
         f"{len(segments)} segments, {len(topic_analyses)} topics, "
         f"{sum(len(s.sentiments) for s in sentiment_analyses)} sentiments"
+    )
+
+
+def store_thematic_results(
+    session: Session,
+    episode: Episode,
+    topic_analyses: list[ThematicTopicAnalysis],
+) -> None:
+    """Persist Thematic Intelligence pipeline output to the database.
+
+    One MergedTopic row per `TopicAnalysis`, plus child rows for entities,
+    hate-speech incidents, and per-speaker insights. The whole write happens
+    in the caller's transaction; this function commits at the end.
+    """
+    logger.info(
+        f"Storing thematic results for episode {episode.id}: "
+        f"{len(topic_analyses)} merged topics"
+    )
+
+    total_entities = 0
+    total_incidents = 0
+    total_insights = 0
+
+    for ta in topic_analyses:
+        merged = MergedTopic(
+            episode_id=episode.id,
+            topic_id=ta.topic_id,
+            merged_title_he=ta.merged_title_he,
+            merged_title_en=ta.merged_title_en,
+            category=ta.category,
+            thematic_flow_he=ta.thematic_flow_he,
+            time_spans=[list(span) for span in ta.time_spans],
+            chunk_ids=list(ta.chunk_ids),
+        )
+        session.add(merged)
+        session.flush()  # need merged.id for FK children
+
+        for ent in ta.entities:
+            session.add(
+                TopicEntity(
+                    merged_topic_id=merged.id,
+                    name_he=ent.name_he,
+                    name_en=ent.name_en,
+                    type=ent.type,
+                    mentioned_by=list(ent.mentioned_by),
+                )
+            )
+            total_entities += 1
+
+        for inc in ta.hate_speech_incidents:
+            session.add(
+                HateSpeechIncidentORM(
+                    merged_topic_id=merged.id,
+                    speaker_label=inc.speaker_label,
+                    level=inc.level,
+                    target=inc.target,
+                    phrase_he=inc.phrase_he,
+                    context_he=inc.context_he,
+                    rationale_en=inc.rationale_en,
+                )
+            )
+            total_incidents += 1
+
+        for speaker_label, insight in ta.speaker_insights.items():
+            session.add(
+                SpeakerInsightORM(
+                    merged_topic_id=merged.id,
+                    speaker_label=speaker_label,
+                    stance=insight.stance,
+                    summary_of_opinion_he=insight.summary_of_opinion_he,
+                    summary_of_opinion_en=insight.summary_of_opinion_en,
+                    evidence_quotes_he=list(insight.evidence_quotes_he),
+                )
+            )
+            total_insights += 1
+
+    episode.status = "analyzed"
+    session.commit()
+    logger.info(
+        f"✓ Stored thematic results for episode {episode.id}: "
+        f"{len(topic_analyses)} topics, {total_entities} entities, "
+        f"{total_incidents} incidents, {total_insights} speaker insights"
     )

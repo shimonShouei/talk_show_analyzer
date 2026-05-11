@@ -45,6 +45,32 @@ HEBREW_NAMING_PATTERNS = [
     "תגידי ",
 ]
 
+_JINGLE_WINDOW_SECONDS = 90  # analyse first 90s for host-name mentions in opening jingle
+
+JINGLE_SYSTEM_PROMPT = """You are analyzing the opening segment of an Israeli Hebrew radio talk show.
+Opening jingles and intro segments frequently announce the show's host(s) by name, using phrases like:
+- "עם [name]" / "עם [first] [last]"  (with [name])
+- "מגיש: [name]" / "מגישה: [name]"  (presented by / hosted by)
+- "מנחה [name]"  (host: [name])
+- Singing or chanting the host's name directly
+
+Your task: extract every personal name (first name, full name) that is mentioned in this opening segment as a host or presenter of the show. Return ONLY names that are clearly being announced as show hosts — not guests.
+
+Return a JSON object:
+{
+  "host_names": ["name1", "name2"],   // Hebrew or transliterated names of hosts found; empty list if none
+  "evidence": "short quote showing where the name(s) appear"
+}
+
+If no host names are clearly stated, return {"host_names": [], "evidence": ""}."""
+
+JINGLE_PROMPT = """Opening segment transcript (first {seconds}s of the episode):
+
+{text}
+
+Extract any host names announced in this opening jingle/intro."""
+
+
 SYSTEM_PROMPT = """You are analyzing a Hebrew radio talk show transcript. Each speaker is labeled
 SPEAKER_NN by an automatic diarization system (acoustically deduplicated before you see it).
 
@@ -83,7 +109,7 @@ IMPORTANT:
 IDENTIFICATION_PROMPT = """Below is a sample of the transcript focused on NAMING MOMENTS — segments
 containing greetings, titles, or direct address, plus a few segments of follow-up context after
 each one. Use cross-speaker name mentions to identify each speaker.
-
+{jingle_section}
 TRANSCRIPT SAMPLE (naming moments):
 {transcript_sample}
 
@@ -205,6 +231,54 @@ def _merge_speakers_acoustic(
     return mapping
 
 
+def _analyze_opening_jingle(
+    transcript: TranscriptionResult,
+    client: anthropic.Anthropic,
+    model: str,
+    window_seconds: float = _JINGLE_WINDOW_SECONDS,
+) -> list[str]:
+    """Return host names found in the opening jingle/intro of the episode.
+
+    Looks at the first `window_seconds` of transcript text and asks Claude to
+    extract any names announced as show hosts. Returns an empty list when none
+    are found or the call fails.
+    """
+    opening_segs = [s for s in transcript.segments if s.start < window_seconds]
+    if not opening_segs:
+        logger.debug("jingle analysis: no segments in first %.0fs", window_seconds)
+        return []
+
+    text = "\n".join(
+        f"[{s.start:.0f}s] {s.speaker}: {s.text}" for s in opening_segs
+    )
+    prompt = JINGLE_PROMPT.format(seconds=int(window_seconds), text=text)
+
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=256,
+            temperature=0,
+            system=JINGLE_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        if not response.content or not response.content[0].text.strip():
+            raise ValueError(f"empty response (stop_reason={response.stop_reason!r})")
+        raw = response.content[0].text.strip()
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw).strip()
+        parsed = json.loads(raw)
+        names: list[str] = parsed.get("host_names", [])
+        evidence: str = parsed.get("evidence", "")
+        if names:
+            logger.info(f"jingle analysis found host names: {names} (evidence: {evidence!r})")
+        else:
+            logger.debug("jingle analysis: no host names found in opening segment")
+        return names
+    except Exception as exc:
+        logger.warning(f"jingle analysis failed: {exc}")
+        return []
+
+
 def _extract_naming_moments(
     transcript: TranscriptionResult,
     label_map: dict[str, str],
@@ -319,10 +393,15 @@ class UnifiedSpeakerIdentifier:
         """
         logger.info("Identifying speakers via unified cross-speaker analysis...")
 
+        # ---- Opening jingle analysis ----
+        jingle_names = _analyze_opening_jingle(transcript, self.client, self.model)
+
         # Collect speaker labels that appear in content segments only
         content_speaker_labels: set[str] = set()
         for seg in content_segments:
-            for sp in seg.speakers:
+            # SpeakerSegment has .speaker (str); legacy Segment has .speakers (list[str])
+            speakers = getattr(seg, "speakers", None) or [seg.speaker]
+            for sp in speakers:
                 content_speaker_labels.add(sp)
 
         if not content_speaker_labels:
@@ -398,7 +477,20 @@ class UnifiedSpeakerIdentifier:
             f"[{s.start:.0f}s] {s.speaker}: {s.text}" for s in moment_segs
         )
 
+        if jingle_names:
+            names_str = ", ".join(f'"{n}"' for n in jingle_names)
+            jingle_section = (
+                f"\nOPENING JINGLE ANALYSIS: The show's opening jingle explicitly announced "
+                f"the following host name(s): {names_str}. "
+                f"Match these names to the speaker who most plausibly is the host "
+                f"(short turns, many questions, bookending). Treat a jingle name match as "
+                f"high-confidence (0.9+) when combined with host structural cues.\n"
+            )
+        else:
+            jingle_section = ""
+
         prompt = IDENTIFICATION_PROMPT.format(
+            jingle_section=jingle_section,
             transcript_sample=transcript_sample,
             speaker_summaries="\n\n".join(speaker_summaries),
         )
@@ -421,6 +513,8 @@ class UnifiedSpeakerIdentifier:
                 messages=[{"role": "user", "content": prompt}],
             )
 
+            if not response.content or not response.content[0].text.strip():
+                raise ValueError(f"empty response (stop_reason={response.stop_reason!r})")
             raw = response.content[0].text.strip()
             # Strip markdown fences if present
             raw = re.sub(r"^```(?:json)?\s*", "", raw)

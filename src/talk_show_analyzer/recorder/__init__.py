@@ -8,6 +8,7 @@ from talk_show_analyzer.recorder.streams import (
     get_stream,
 )
 from talk_show_analyzer.recorder.capture import record_stream, record_station
+from talk_show_analyzer.recorder.downloader import download_episode
 
 __all__ = [
     "StreamInfo",
@@ -17,4 +18,5 @@ __all__ = [
     "get_stream",
     "record_stream",
     "record_station",
+    "download_episode",
 ]

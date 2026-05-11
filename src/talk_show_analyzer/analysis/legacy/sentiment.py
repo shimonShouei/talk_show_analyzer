@@ -8,8 +8,8 @@ import anthropic
 from loguru import logger
 
 from talk_show_analyzer.config import settings
-from talk_show_analyzer.analysis.segmenter import Segment
-from talk_show_analyzer.analysis.topics import TopicAnalysis
+from talk_show_analyzer.analysis.legacy.segmenter import Segment
+from talk_show_analyzer.analysis.legacy.topics import TopicAnalysis
 from talk_show_analyzer.analysis.prompts.sentiment import (
     SYSTEM_PROMPT,
     format_segment_for_sentiment,

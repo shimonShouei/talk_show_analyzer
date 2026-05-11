@@ -1,17 +1,48 @@
 #!/bin/bash
-#SBATCH --job-name=tsa-e2e-10min
-#SBATCH --time=0:45:00
+#
+# Parameterized SLURM script for the talk-show-analyzer pipeline.
+#
+# Usage:
+#   sbatch --export=STATION=103fm,DURATION=600 slurm/run_pipeline.slurm
+#   sbatch --export=STATION=kan_bet,DURATION=1800 slurm/run_pipeline.slurm
+#
+# Parameters (passed via --export):
+#   STATION     — 103fm, galatz, or kan_bet (default: 103fm)
+#   DURATION    — Duration in seconds (default: 600 = 10 minutes)
+#   OUTPUT_DIR  — Output directory (default: data/e2e_<STATION>_<DURATION>)
+#
+
+#SBATCH --job-name=tsa-pipeline
+#SBATCH --time=1:00:00
 #SBATCH --mem=24G
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:rtx_3090:1
-#SBATCH --output=/home/shouei/talk_show_analyzer/slurm_logs/e2e_10min_%j.out
-#SBATCH --error=/home/shouei/talk_show_analyzer/slurm_logs/e2e_10min_%j.err
+#SBATCH --output=/home/shouei/talk_show_analyzer/slurm_logs/pipeline_%j.out
+#SBATCH --error=/home/shouei/talk_show_analyzer/slurm_logs/pipeline_%j.err
 
 set -e
 
+# Defaults
+STATION="${STATION:-103fm}"
+DURATION="${DURATION:-600}"
+OUTPUT_DIR="${OUTPUT_DIR:-data/e2e_${STATION}_${DURATION}}"
+
+STATION_NAME=""
+case "$STATION" in
+    103fm) STATION_NAME="103FM" ;;
+    galatz) STATION_NAME="Galatz" ;;
+    kan_bet) STATION_NAME="Kan Reshet Bet" ;;
+    *) echo "Invalid STATION: $STATION"; exit 1 ;;
+esac
+
+DURATION_MIN=$((DURATION / 60))
+
 echo "=========================================="
-echo "103FM 10-MIN E2E TEST"
+echo "TALK SHOW ANALYZER PIPELINE"
 echo "=========================================="
+echo "Station      : $STATION_NAME ($STATION)"
+echo "Duration     : $DURATION_MIN minutes ($DURATION seconds)"
+echo "Output dir   : $OUTPUT_DIR"
 echo "Job started at $(date)"
 echo "Node: $(hostname) | GPU: $CUDA_VISIBLE_DEVICES"
 nvidia-smi | head -20
@@ -25,9 +56,9 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 echo "Python: $(python --version) at $(which python)"
 echo ""
 
-mkdir -p slurm_logs data/e2e_10min
+mkdir -p slurm_logs "$OUTPUT_DIR"
 
-python << 'EOF'
+python << EOF
 import sys
 from pathlib import Path
 from loguru import logger
@@ -43,9 +74,9 @@ logger.add(
 )
 
 logger.info("\n" + "=" * 70)
-logger.info("E2E 10-MIN PIPELINE TEST")
-logger.info("Station: 103FM | Duration: 10 min")
-logger.info("Steps: record → transcribe → segment → identify_speakers → topics → sentiment → store")
+logger.info(f"PIPELINE: {STATION_NAME}")
+logger.info(f"Duration: {DURATION_MIN} min | Station: {STATION}")
+logger.info("Steps: record → transcribe → identify_speakers → topics → store")
 logger.info("=" * 70 + "\n")
 
 init_db()
@@ -54,9 +85,9 @@ logger.info("✓ Database initialized\n")
 try:
     orchestrator = PipelineOrchestrator()
     episode = orchestrator.run(
-        station="103fm",
-        duration_seconds=600,  # 10 minutes
-        output_dir=Path("data/e2e_10min"),
+        station="${STATION}",
+        duration_seconds=${DURATION},
+        output_dir=Path("${OUTPUT_DIR}"),
     )
 
     logger.info("\n" + "=" * 70)
@@ -74,22 +105,15 @@ try:
     for t, c in sorted(seg_by_type.items()):
         logger.info(f"    {t}: {c}")
 
-    logger.info(f"  Topics      : {sum(len(s.topics) for s in episode.segments)}")
-    logger.info(f"  Sentiments  : {sum(len(s.sentiments) for s in episode.segments)}")
-
-    # Speaker identification results
     from talk_show_analyzer.db import get_session
-    from talk_show_analyzer.models import SpeakerIdentity, Person
+    from talk_show_analyzer.models import SpeakerIdentity
     with get_session() as session:
         identities = (
             session.query(SpeakerIdentity)
             .filter(SpeakerIdentity.episode_id == episode.id)
             .all()
         )
-        logger.info(f"\n  Speaker Identities ({len(identities)} total):")
-        for si in identities:
-            name = si.person.name_en if si.person else "Unknown"
-            logger.info(f"    {si.speaker_label} → {name} ({si.role}, conf={si.confidence:.2f})")
+        logger.info(f"  Speaker Identities ({len(identities)} total)")
 
     logger.info("")
 

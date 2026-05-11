@@ -299,6 +299,132 @@ class SpeakerIdentity(Base):
         return f"<SpeakerIdentity ep={self.episode_id} {self.speaker_label}->{person_str} conf={self.confidence:.2f}>"
 
 
+class MergedTopic(Base):
+    """A topic merged across the show by the Thematic Intelligence pipeline."""
+
+    __tablename__ = "merged_topics"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    episode_id: Mapped[int] = mapped_column(ForeignKey("episodes.id"), nullable=False)
+    topic_id: Mapped[str] = mapped_column(String(50), nullable=False)  # e.g. "t0"
+    merged_title_he: Mapped[str] = mapped_column(String(500), nullable=False)
+    merged_title_en: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    category: Mapped[str] = mapped_column(String(50), nullable=False)
+    thematic_flow_he: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    time_spans: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    chunk_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+
+    # Relationships
+    episode: Mapped["Episode"] = relationship("Episode")
+    entities: Mapped[List["TopicEntity"]] = relationship(
+        "TopicEntity", back_populates="merged_topic", cascade="all, delete-orphan"
+    )
+    hate_speech_incidents: Mapped[List["HateSpeechIncidentORM"]] = relationship(
+        "HateSpeechIncidentORM",
+        back_populates="merged_topic",
+        cascade="all, delete-orphan",
+    )
+    speaker_insights: Mapped[List["SpeakerInsightORM"]] = relationship(
+        "SpeakerInsightORM",
+        back_populates="merged_topic",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("idx_merged_topic_episode", "episode_id", "topic_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<MergedTopic ep={self.episode_id} {self.topic_id}: {self.merged_title_en}>"
+
+
+class TopicEntity(Base):
+    """A named entity (organization / location / figure) inside a merged topic."""
+
+    __tablename__ = "topic_entities"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    merged_topic_id: Mapped[int] = mapped_column(
+        ForeignKey("merged_topics.id"), nullable=False
+    )
+    name_he: Mapped[str] = mapped_column(String(255), nullable=False)
+    name_en: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    type: Mapped[str] = mapped_column(String(50), nullable=False)  # organization|location|figure
+    mentioned_by: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+
+    merged_topic: Mapped["MergedTopic"] = relationship(
+        "MergedTopic", back_populates="entities"
+    )
+
+    __table_args__ = (
+        Index("idx_topic_entity_topic", "merged_topic_id"),
+        Index("idx_topic_entity_type", "type"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<TopicEntity {self.type}: {self.name_en or self.name_he}>"
+
+
+class HateSpeechIncidentORM(Base):
+    """A single hate-speech / evaluative-talk incident inside a merged topic."""
+
+    __tablename__ = "hate_speech_incidents"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    merged_topic_id: Mapped[int] = mapped_column(
+        ForeignKey("merged_topics.id"), nullable=False
+    )
+    speaker_label: Mapped[str] = mapped_column(String(50), nullable=False)
+    level: Mapped[str] = mapped_column(String(50), nullable=False)
+    target: Mapped[str] = mapped_column(String(500), nullable=False)
+    phrase_he: Mapped[str] = mapped_column(String(500), nullable=False)
+    context_he: Mapped[str] = mapped_column(Text, nullable=False)
+    rationale_en: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+    merged_topic: Mapped["MergedTopic"] = relationship(
+        "MergedTopic", back_populates="hate_speech_incidents"
+    )
+
+    __table_args__ = (
+        Index("idx_hate_speech_topic_speaker", "merged_topic_id", "speaker_label"),
+        Index("idx_hate_speech_level", "level"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<HateSpeech {self.level} {self.speaker_label} → {self.target}>"
+
+
+class SpeakerInsightORM(Base):
+    """One speaker's stance + opinion summary on one merged topic."""
+
+    __tablename__ = "speaker_insights"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    merged_topic_id: Mapped[int] = mapped_column(
+        ForeignKey("merged_topics.id"), nullable=False
+    )
+    speaker_label: Mapped[str] = mapped_column(String(50), nullable=False)
+    stance: Mapped[str] = mapped_column(String(50), nullable=False)  # support|oppose|neutral|ambivalent
+    summary_of_opinion_he: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    summary_of_opinion_en: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    evidence_quotes_he: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+
+    merged_topic: Mapped["MergedTopic"] = relationship(
+        "MergedTopic", back_populates="speaker_insights"
+    )
+
+    __table_args__ = (
+        Index("idx_speaker_insight_topic_speaker", "merged_topic_id", "speaker_label"),
+        Index("idx_speaker_insight_stance", "stance"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<SpeakerInsight topic={self.merged_topic_id} "
+            f"{self.speaker_label} stance={self.stance}>"
+        )
+
+
 __all__ = [
     "Base",
     "Station",
@@ -311,4 +437,8 @@ __all__ = [
     "PipelineRun",
     "Person",
     "SpeakerIdentity",
+    "MergedTopic",
+    "TopicEntity",
+    "HateSpeechIncidentORM",
+    "SpeakerInsightORM",
 ]

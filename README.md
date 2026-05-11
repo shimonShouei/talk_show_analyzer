@@ -5,119 +5,100 @@ Automated daily recording, transcription, and analysis of Israeli radio talk sho
 ## Key Features
 
 - **Free speech-to-text**: Faster-Whisper + Pyannote (self-hosted, no API costs)
-- **Hebrew support**: Native transcription and analysis in Hebrew
-- **Speaker identification**: Automatic speaker diarization
-- **Analysis**: Guest identification, topic extraction, sentiment analysis, political leaning assessment
-- **Dashboard**: Streamlit-based visualization of trends and insights
+- **Hebrew support**: Native transcription and analysis
+- **Speaker identification**: Automatic diarization + re-identification across episodes
+- **Episode download**: Fetch recorded episodes from any URL (HLS, direct MP3, etc.)
+- **Analysis**: Guest identification, topic/thematic extraction, sentiment analysis
+- **Dashboard**: Streamlit multi-page visualization (overview, episodes, guests, topics, sentiment)
+- **Pipeline**: Checkpoint-based orchestration with database persistence
 
 ## Architecture
 
 ```
-[Cron 05:50 IST] → [Record 3 streams via ffmpeg ~4hrs]
+[Cron 05:50 IST] → [Record 3 streams via ffmpeg ~4hrs]  OR  [Download episode by URL]
     → [Chunk audio into 25-min pieces]
     → [Faster-Whisper transcription (Hebrew) + Pyannote diarization]
-    → [Claude API analysis: segments, guests, topics, sentiment, political leaning]
-    → [Store in PostgreSQL]
+    → [Claude API analysis: segments, guests, topics, sentiment]
+    → [Store in SQLite / PostgreSQL]
     → [Streamlit dashboard]
 ```
 
-**Cost**: ~$16-22/day (Claude API only; transcription is free self-hosted)
+**Cost**: ~$16-22/day (Claude API only; transcription is free and self-hosted)
 
 ## Setup
 
-### 1. Prerequisites
+### Prerequisites
 
-- Python 3.10+
-- PostgreSQL 13+
-- NVIDIA GPU recommended (for faster Whisper/Pyannote inference)
-  - CPU-only is possible but ~10x slower
+- Python 3.11 (conda env recommended — see cluster notes below)
+- NVIDIA GPU recommended (RTX 3090+ for fp16; CPU-only is ~10x slower)
 - HuggingFace account (free, for Pyannote models)
-- Anthropic API key (for Claude analysis, optional for testing)
+- Anthropic API key (for Claude analysis)
+- ffmpeg (for recording and download)
 
-### 2. Install Dependencies
-
-```bash
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install project
-pip install -e .
-```
-
-### 3. Setup Environment
+### Install (conda — recommended on clusters)
 
 ```bash
-cp .env.example .env
-# Edit .env and fill in:
-#   - DATABASE_URL (PostgreSQL)
-#   - HF_TOKEN (from https://huggingface.co/settings/tokens)
-#   - ANTHROPIC_API_KEY (optional, for analysis phase)
+conda create -n talk_show -y python=3.11 pytorch torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
+conda activate talk_show
+conda install -y -c conda-forge ffmpeg
+pip install -e . --no-cache-dir
+
+# Required at runtime on clusters with older system libstdc++
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+cp .env.example .env  # Fill in HF_TOKEN, DATABASE_URL, ANTHROPIC_API_KEY
 ```
 
-### 4. Download Models
-
-Models are downloaded automatically on first use, but you can pre-download:
+### Database
 
 ```bash
-python -c "from faster_whisper import WhisperModel; WhisperModel('base')"
-python -c "from pyannote.audio import Pipeline; Pipeline.from_pretrained('pyannote/speaker-diarization-3.0', use_auth_token=True)"
+# Local / SLURM (no server needed)
+DATABASE_URL=sqlite:///./talk_show.db
+
+# Production
+DATABASE_URL=postgresql://user:password@db-host/talk_show_analyzer
 ```
-
-**Model sizes** (Faster-Whisper):
-- `tiny`: ~39M, ~16GB VRAM, ~4x real-time (fastest)
-- `base`: ~140M, ~15GB VRAM, ~8x real-time (recommended)
-- `small`: ~244M, ~24GB VRAM, ~6x real-time
-- `medium`: ~769M, ~48GB VRAM, ~2x real-time
-- `large`: ~1.5B, ~60GB VRAM, 1x real-time (best quality)
-
-### 5. Quick Test
-
-```bash
-# Transcribe a sample Hebrew audio file
-python example_transcribe.py
-```
-
-This will create a `transcript.json` with transcription + speaker segments.
 
 ## Usage
 
-### Transcribe a file
+### Record a live stream
+
+```python
+from talk_show_analyzer.recorder import record_station
+
+record_station("103fm", "output.mp3", duration_seconds=3600)
+```
+
+### Download a recorded episode
+
+```python
+from talk_show_analyzer.recorder import download_episode
+
+# Works with HLS playlists, direct MP3/M4A links, and most media URLs
+download_episode(
+    url="https://example.com/episode.mp3",
+    output_path="episode.mp3",
+    referer="https://example.com",  # optional, for geo-gated pages
+    use_ffmpeg=True,                 # False → plain HTTP download
+)
+```
+
+### Transcribe
 
 ```python
 from talk_show_analyzer.transcription import Transcriber
 
-transcriber = Transcriber(
-    model_size="base",
-    device="auto",      # Use GPU if available
-    enable_diarization=True,
-)
-
-result = transcriber.transcribe_file(
-    "sample_radio.mp3",
-    output_json="transcript.json",
-    language="he",
-)
-
-print(f"Transcribed {result.duration/60:.1f} min of audio")
-print(f"Found {len(result.segments)} speaker segments")
+transcriber = Transcriber(model_size="base", device="auto", enable_diarization=True)
+result = transcriber.transcribe_file("episode.mp3", language="he")
+print(f"{result.duration/60:.1f} min, {len(result.segments)} segments")
 ```
 
-### Chunk audio
-
-For long files (>25 min), split into chunks first:
+### Chunk long recordings
 
 ```python
 from talk_show_analyzer.transcription import chunk_audio
 
-chunks = chunk_audio(
-    "long_recording.mp3",
-    chunk_duration_seconds=1500,  # 25 min chunks
-    overlap_seconds=60,            # 1 min overlap
-)
-
-for chunk_path in chunks:
-    result = transcriber.transcribe_file(chunk_path, language="he")
+chunks = chunk_audio("long_recording.mp3", chunk_duration_seconds=1500, overlap_seconds=60)
 ```
 
 ## Project Structure
@@ -125,64 +106,78 @@ for chunk_path in chunks:
 ```
 talk_show_analyzer/
 ├── src/talk_show_analyzer/
-│   ├── config.py                 # Configuration (Pydantic)
+│   ├── config.py                   # Pydantic settings (env vars)
+│   ├── recorder/
+│   │   ├── capture.py              # Live stream recording via ffmpeg
+│   │   ├── downloader.py           # Download recorded episodes by URL
+│   │   └── streams.py              # Station registry + health checks
 │   ├── transcription/
-│   │   ├── transcriber.py        # Faster-Whisper + Pyannote
-│   │   ├── chunker.py            # Audio chunking
-│   │   └── __init__.py
-│   ├── recorder/                 # (TODO: Recording module)
-│   ├── analysis/                 # (TODO: Analysis module)
-│   └── pipeline/                 # (TODO: Pipeline orchestration)
+│   │   ├── transcriber.py          # Faster-Whisper + Pyannote diarization
+│   │   ├── chunker.py              # Audio chunking (25-min pieces, 1-min overlap)
+│   │   └── speaker_linking.py      # Cross-chunk speaker label merging
+│   ├── analysis/
+│   │   ├── thematic_analyzer.py    # ⭐ Active: topic-first 3-stage analyzer
+│   │   ├── utils.py                # Shared utilities (sliding windows)
+│   │   ├── legacy/                 # Deprecated: old pipeline (segmenter, topics, sentiment, guests, ads)
+│   │   └── prompts/                # Prompt templates for Claude API
+│   ├── identification/
+│   │   └── llm_identifier.py       # Speaker re-identification across episodes
+│   ├── pipeline/
+│   │   ├── orchestrator.py         # End-to-end pipeline with checkpoint recovery
+│   │   └── store.py                # Database persistence
+│   ├── dashboard/                  # Streamlit multi-page app
+│   ├── models/                     # SQLAlchemy ORM models
+│   └── db.py                       # SQLAlchemy engine + session
+├── tests/                          # Test suite
+│   ├── conftest.py                 # Shared fixtures (transcript loading)
+│   ├── test_analysis.py            # Legacy pipeline tests
+│   ├── test_dashboard.py           # Dashboard validation
+│   ├── test_e2e.py                 # Full E2E pipeline test
+│   └── test_speaker_*.py           # Speaker identification tests
+├── scripts/                        # Utility scripts
+│   ├── run_dashboard.py            # Streamlit dashboard launcher
+│   ├── reidentify_speakers.py      # Re-run speaker ID on existing episodes
+│   └── example_transcribe.py       # Transcription example
+├── slurm/                          # ⭐ Parameterized SLURM job templates
+│   ├── run_pipeline.slurm          # Main pipeline (station + duration)
+│   ├── run_e2e_test.slurm          # E2E test validation
+│   ├── run_gpu_test.slurm          # GPU environment check
+│   └── reanalyze.slurm             # Re-analyze episode
+├── .claude/                        # Claude Code settings
+├── alembic/                        # Database migrations
 ├── pyproject.toml
-├── .env.example
-├── README.md
-└── example_transcribe.py
+├── CLAUDE.md                       # Project guide for Claude Code
+└── .env.example
 ```
 
-## FAQ
-
-### Q: Do I need a GPU?
-**A:** GPU is highly recommended. With a GPU (RTX 4070), transcription runs 8-10x realtime. CPU-only would require ~30-40 min to transcribe 4 hrs of audio.
-
-### Q: Will this work on a cloud instance?
-**A:** Yes. For inference:
-- AWS: `g4dn.xlarge` (NVIDIA T4) or `p3.2xlarge` (V100) — costs ~$0.50-1.00/hr
-- Google Cloud: `n1-standard-4` with `NVIDIA T4`
-- Self-hosted: Rent a GPU instance from Vast.ai, Lambda Labs, or Runpod
-
-For recording streams (which need Israeli IP/headers), use an Israeli VPS relay or cloud region.
-
-### Q: What about accuracy?
-**A:** Faster-Whisper's accuracy is equivalent to the official OpenAI Whisper API. For Hebrew, expect ~95-98% character accuracy on formal speech.
-
-Diarization accuracy (speaker identification) depends on:
-- Number of speakers (2-4 speakers: ~90-95%, 5+ speakers: ~80-85%)
-- Audio quality (clean studio audio: ~95%, noisy: ~70%)
-
-### Q: Can I use CPU only?
-**A:** Yes, but it will be very slow:
-- `tiny` model: ~5 min to transcribe 1 min of audio
-- `base` model: ~15-20 min per 1 min of audio
-
-Not practical for daily 4-hour recordings without significant hardware.
-
-### Q: How do I handle multiple chunks from a single show?
-**A:** The pipeline will:
-1. Transcribe each chunk independently
-2. Merge diarization across chunks (cross-chunk speaker continuity)
-3. Concatenate transcripts preserving timestamps
-
-Speaker merging is handled via Pyannote's temporal continuity, so `SPEAKER_00` in chunk 1 becomes `SPEAKER_00` in chunk 2 if the same person speaks.
-
-## Development
-
-### Run tests
+## Running on SLURM (BGU Cluster)
 
 ```bash
-pytest tests/
+# Run main pipeline: record 103FM for 15 minutes
+sbatch --export=STATION=103fm,DURATION=900 slurm/run_pipeline.slurm
+
+# Run Kan Bet for 30 minutes
+sbatch --export=STATION=kan_bet,DURATION=1800 slurm/run_pipeline.slurm
+
+# Run E2E tests
+sbatch slurm/run_e2e_test.slurm
+
+# Check GPU setup
+sbatch slurm/run_gpu_test.slurm
+
+# Re-analyze episode 5
+sbatch --export=EPISODE_ID=5 slurm/reanalyze.slurm
+
+# Monitor jobs
+squeue -u $USER -l
+tail -f slurm_logs/pipeline_<JOBID>.out
 ```
 
-### Code quality
+See `.claude/SLURM_MIGRATION.md` for detailed parameter documentation.
+
+**Supported GPUs**: RTX 3090, 4090, 6000, RTX Pro 6000. GTX 1080 and TITAN Xp (Pascal, sm_61) are unsupported.
+
+## Code Quality
 
 ```bash
 black src/
@@ -190,16 +185,18 @@ ruff check src/
 mypy src/
 ```
 
-## Next Steps
+## FAQ
 
-1. **Phase 1B**: Implement `recorder/` module for streaming capture
-2. **Phase 3**: Implement analysis modules (Claude-based segmentation, guest ID, sentiment, etc.)
-3. **Phase 4**: Orchestrator + CLI
-4. **Phase 5**: Streamlit dashboard
-5. **Phase 6**: Cloud deployment (Terraform + Docker)
+**Do I need a GPU?** GPU is highly recommended. RTX 3090 transcribes 5 min of audio in ~4.5 min total (recording + transcription). CPU-only would take ~30-40 min for 4 hrs of audio.
+
+**What about accuracy?** Faster-Whisper matches OpenAI Whisper API quality. Hebrew: ~95-98% character accuracy on clear studio speech. Diarization: ~90-95% for 2-4 speakers in clean audio.
+
+**Can I download instead of record live?** Yes — use `download_episode()` for any podcast/archive URL. It supports HLS playlists and direct file links via ffmpeg.
+
+**Will this work from outside Israel?** Recording live streams requires an Israeli IP (BGU cluster works directly). For episode downloads, a standard IP is usually sufficient.
 
 ## References
 
-- [Faster-Whisper docs](https://github.com/SYSTRAN/faster-whisper)
+- [Faster-Whisper](https://github.com/SYSTRAN/faster-whisper)
 - [Pyannote speaker diarization](https://github.com/pyannote/pyannote-audio)
 - [HuggingFace models](https://huggingface.co/pyannote)

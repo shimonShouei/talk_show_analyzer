@@ -13,6 +13,7 @@ from talk_show_analyzer.analysis.prompts.segmentation import (
     SYSTEM_PROMPT,
     format_window,
 )
+from talk_show_analyzer.analysis.utils import create_sliding_windows
 
 
 @dataclass
@@ -59,7 +60,9 @@ class Segmenter:
         )
 
         # Create windows with overlap
-        windows = self._create_windows(transcript)
+        windows = create_sliding_windows(
+            transcript, self.WINDOW_SIZE_SECONDS, self.OVERLAP_SECONDS
+        )
         logger.info(f"Created {len(windows)} analysis windows")
 
         # Process each window with Claude
@@ -78,41 +81,6 @@ class Segmenter:
 
         return merged
 
-    def _create_windows(
-        self, transcript: TranscriptionResult
-    ) -> list[list]:
-        """Create overlapping windows of speaker segments.
-
-        Args:
-            transcript: TranscriptionResult
-
-        Returns:
-            List of windows, each window is a list of SpeakerSegment
-        """
-        segments = transcript.segments
-        if not segments:
-            return []
-
-        windows = []
-        window_start = 0.0
-
-        while window_start < transcript.duration:
-            window_end = min(window_start + self.WINDOW_SIZE_SECONDS, transcript.duration)
-
-            # Get segments that fall within [window_start, window_end)
-            window_segments = [
-                seg
-                for seg in segments
-                if seg.start < window_end and seg.end > window_start
-            ]
-
-            if window_segments:
-                windows.append(window_segments)
-
-            # Advance window with overlap
-            window_start += self.WINDOW_SIZE_SECONDS - self.OVERLAP_SECONDS
-
-        return windows
 
     def _analyze_window(self, segments: list) -> list[Segment]:
         """Send a window of segments to Claude for classification.

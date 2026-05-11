@@ -11,7 +11,17 @@
       "Bash(git commit -m 'Update 103FM stream URL to working endpoint *)",
       "Bash(sbatch *)",
       "Bash(squeue *)",
-      "Bash(scancel 17274313)"
+      "Bash(scancel 17274313)",
+      "Bash(curl -sL --max-time 10 -H 'User-Agent: Mozilla/5.0' -H 'Referer: https://www.kan.org.il/' https://www.kan.org.il/api/stations/4483)",
+      "Bash(curl -sL --max-time 10 -H 'User-Agent: Mozilla/5.0' -H 'Referer: https://www.kan.org.il/' 'https://www.kan.org.il/live/api/?stationId=4483')",
+      "Bash(curl -sL --max-time 15 -H \"User-Agent: Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\)\" \"https://radio.coolsite.co.il/?radio=10\")",
+      "Bash(curl -sL --max-time 15 -H \"User-Agent: Mozilla/5.0\" \"https://radio.coolsite.co.il/radios.json\")",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -sL --max-time 15 -H \"User-Agent: Mozilla/5.0\" \"https://radio.coolsite.co.il/radios.js\")",
+      "Bash(curl -sL --max-time 15 -H \"User-Agent: Mozilla/5.0\" \"https://radio.coolsite.co.il/stations.js\")",
+      "Bash(conda run *)",
+      "Bash(sacct -j 17461781 --format=JobID,State,ExitCode,Start,End)",
+      "Bash(grep -E '^\\(tests|scripts|slurm|src\\)$')"
     ]
   }
 }

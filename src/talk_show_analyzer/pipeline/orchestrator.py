@@ -6,25 +6,21 @@ from pathlib import Path
 from typing import Any, Callable
 
 from loguru import logger
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session
 
 from talk_show_analyzer.config import settings
 from talk_show_analyzer.db import get_session
-from talk_show_analyzer.models import Episode, PipelineRun, Station, Segment
+from talk_show_analyzer.models import Episode, PipelineRun, Station
 from talk_show_analyzer.recorder import record_station
 from talk_show_analyzer.transcription import Transcriber
-from talk_show_analyzer.analysis import (
-    Segmenter,
-    TopicExtractor,
-    SentimentAnalyzer,
-    aggregate_ads,
-)
+from talk_show_analyzer.analysis import ThematicAnalyzer
+from talk_show_analyzer.analysis.thematic_analyzer import TopicAnalysis
 from talk_show_analyzer.identification import UnifiedSpeakerIdentifier
 from talk_show_analyzer.transcription.transcriber import (
     TranscriptionResult,
     SpeakerSegment,
 )
-from talk_show_analyzer.pipeline.store import store_episode_results
+from talk_show_analyzer.pipeline.store import store_thematic_results
 
 
 class PipelineOrchestrator:
@@ -33,15 +29,10 @@ class PipelineOrchestrator:
     STEPS = [
         "record",
         "transcribe",
-        "segment",
         "identify_speakers",
-        "topics",
-        "sentiment",
+        "thematic",
         "store",
     ]
-
-    # Segment types treated as non-content (filtered before analysis)
-    AD_TYPES = {"ad", "jingle", "music"}
 
     def __init__(self):
         """Initialize orchestrator."""
@@ -49,10 +40,8 @@ class PipelineOrchestrator:
             device=settings.whisper_device,
             compute_type=settings.whisper_compute_type,
         )
-        self.segmenter = Segmenter()
         self.speaker_identifier = UnifiedSpeakerIdentifier()
-        self.topic_extractor = TopicExtractor()
-        self.sentiment_analyzer = SentimentAnalyzer()
+        self.thematic_analyzer = ThematicAnalyzer()
 
     def run(
         self,
@@ -116,70 +105,124 @@ class PipelineOrchestrator:
                 lambda: self._step_transcribe(audio_path),
             )
 
-            # Step 3: Segment (before speaker ID so ads can be filtered)
-            segments = self._run_step_with_checkpoint(
-                episode_id,
-                "segment",
-                lambda: self._step_segment(transcript),
-            )
-
-            content_segments = [s for s in segments if s.type not in self.AD_TYPES]
-            logger.info(
-                f"Filtered to {len(content_segments)}/{len(segments)} content segments "
-                f"(excluded: {len(segments) - len(content_segments)} ad/jingle/music)"
-            )
-
-            # Step 4: Identify speakers using cross-speaker name mentions
+            # Step 3: Identify speakers across the whole transcript
             speaker_identities = self._run_step_with_checkpoint(
                 episode_id,
                 "identify_speakers",
-                lambda: self._step_identify_speakers(transcript, content_segments, episode_id),
+                lambda: self._step_identify_speakers(
+                    transcript, transcript.segments, episode_id
+                ),
             )
 
-            # Step 5: Topics
+            # Step 4: Thematic Intelligence pipeline (segment + merge + analyze)
             topic_analyses = self._run_step_with_checkpoint(
                 episode_id,
-                "topics",
-                lambda: self._step_topics(content_segments),
+                "thematic",
+                lambda: self._step_thematic(transcript),
             )
 
-            # Step 6: Sentiment
-            sentiment_analyses = self._run_step_with_checkpoint(
-                episode_id,
-                "sentiment",
-                lambda: self._step_sentiment(topic_analyses),
-            )
-
-            # Step 7: Store
-            ads_report = self._run_step_with_checkpoint(
+            # Step 5: Store
+            self._run_step_with_checkpoint(
                 episode_id,
                 "store",
-                lambda: self._step_store(
-                    episode_id,
-                    transcript,
-                    segments,
-                    topic_analyses,
-                    sentiment_analyses,
-                ),
+                lambda: self._step_store(episode_id, transcript, topic_analyses),
             )
 
             logger.info(f"\n{'='*60}")
             logger.info("✓ PIPELINE COMPLETE")
             logger.info(f"{'='*60}\n")
 
-            # Fetch and return updated episode with relationships eagerly loaded
+            # Fetch and return updated episode
             with get_session() as session:
                 episode = (
-                    session.query(Episode)
-                    .filter_by(id=episode_id)
-                    .options(
-                        joinedload(Episode.segments).joinedload(Segment.topics),
-                        joinedload(Episode.segments).joinedload(Segment.guest_appearances),
-                        joinedload(Episode.segments).joinedload(Segment.sentiments),
-                    )
-                    .first()
+                    session.query(Episode).filter_by(id=episode_id).first()
                 )
                 return episode
+
+        except Exception as e:
+            logger.error(f"\n✗ PIPELINE FAILED: {e}")
+            raise
+
+    def run_from_file(
+        self,
+        audio_path: str | Path,
+        station: str = "unknown",
+        duration_seconds: int | None = None,
+    ) -> Episode:
+        """
+        Run the pipeline on an existing audio file, skipping the record step.
+
+        Args:
+            audio_path: Path to the audio file (e.g. a downloaded episode).
+            station: Station name to associate in the database.
+            duration_seconds: If set, trim the audio to this many seconds before
+                processing (uses ffmpeg; handy for quick tests).
+
+        Returns:
+            Episode model instance.
+        """
+        audio_path = Path(audio_path)
+        if not audio_path.exists():
+            raise FileNotFoundError(audio_path)
+
+        if duration_seconds is not None:
+            trimmed = audio_path.parent / f"{audio_path.stem}_trim{duration_seconds}s.mp3"
+            logger.info(f"Trimming to {duration_seconds}s → {trimmed}")
+            import subprocess
+            result = subprocess.run(
+                ["ffmpeg", "-i", str(audio_path), "-t", str(duration_seconds),
+                 "-acodec", "copy", "-y", str(trimmed)],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"ffmpeg trim failed: {result.stderr[-300:]}")
+            audio_path = trimmed
+
+        logger.info(f"\n{'='*60}")
+        logger.info(f"PIPELINE START (from file): {audio_path.name}")
+        logger.info(f"{'='*60}\n")
+
+        with get_session() as session:
+            db_station = self._get_or_create_station(session, station)
+            episode = Episode(
+                station_id=db_station.id,
+                recorded_at=datetime.utcnow(),
+                duration=0,
+                audio_path=str(audio_path),
+                language="he",
+                word_count=0,
+                raw_text="",
+                status="pending",
+            )
+            session.add(episode)
+            session.commit()
+            episode_id = episode.id
+            logger.info(f"Created episode record: id={episode_id}\n")
+
+        try:
+            transcript = self._run_step_with_checkpoint(
+                episode_id, "transcribe", lambda: self._step_transcribe(audio_path)
+            )
+            speaker_identities = self._run_step_with_checkpoint(
+                episode_id,
+                "identify_speakers",
+                lambda: self._step_identify_speakers(transcript, transcript.segments, episode_id),
+            )
+            topic_analyses = self._run_step_with_checkpoint(
+                episode_id, "thematic", lambda: self._step_thematic(transcript)
+            )
+            self._run_step_with_checkpoint(
+                episode_id,
+                "store",
+                lambda: self._step_store(episode_id, transcript, topic_analyses),
+            )
+
+            logger.info(f"\n{'='*60}")
+            logger.info("✓ PIPELINE COMPLETE")
+            logger.info(f"{'='*60}\n")
+
+            with get_session() as session:
+                return session.query(Episode).filter_by(id=episode_id).first()
 
         except Exception as e:
             logger.error(f"\n✗ PIPELINE FAILED: {e}")
@@ -237,59 +280,32 @@ class PipelineOrchestrator:
         # Continue from where we left off
         try:
             if not last_done or last_done == "transcribe":
-                segments = self._run_step_with_checkpoint(
-                    episode_id,
-                    "segment",
-                    lambda: self._step_segment(transcript),
-                )
-
-            content_segments = [s for s in segments if s.type not in self.AD_TYPES]
-
-            if not last_done or last_done in ["transcribe", "segment"]:
                 speaker_identities = self._run_step_with_checkpoint(
                     episode_id,
                     "identify_speakers",
-                    lambda: self._step_identify_speakers(transcript, content_segments, episode_id),
+                    lambda: self._step_identify_speakers(
+                        transcript, transcript.segments, episode_id
+                    ),
                 )
 
-            if not last_done or last_done in ["transcribe", "segment", "identify_speakers"]:
+            if not last_done or last_done in ["transcribe", "identify_speakers"]:
                 topic_analyses = self._run_step_with_checkpoint(
                     episode_id,
-                    "topics",
-                    lambda: self._step_topics(content_segments),
+                    "thematic",
+                    lambda: self._step_thematic(transcript),
                 )
 
-            if not last_done or last_done in ["transcribe", "segment", "identify_speakers", "topics"]:
-                sentiment_analyses = self._run_step_with_checkpoint(
-                    episode_id,
-                    "sentiment",
-                    lambda: self._step_sentiment(topic_analyses),
-                )
-
-            ads_report = self._run_step_with_checkpoint(
+            self._run_step_with_checkpoint(
                 episode_id,
                 "store",
-                lambda: self._step_store(
-                    episode_id,
-                    transcript,
-                    segments,
-                    topic_analyses,
-                    sentiment_analyses,
-                ),
+                lambda: self._step_store(episode_id, transcript, topic_analyses),
             )
 
             logger.info("✓ Resume completed")
 
             with get_session() as session:
                 episode = (
-                    session.query(Episode)
-                    .filter_by(id=episode_id)
-                    .options(
-                        joinedload(Episode.segments).joinedload(Segment.topics),
-                        joinedload(Episode.segments).joinedload(Segment.guest_appearances),
-                        joinedload(Episode.segments).joinedload(Segment.sentiments),
-                    )
-                    .first()
+                    session.query(Episode).filter_by(id=episode_id).first()
                 )
                 return episode
 
@@ -405,15 +421,10 @@ class PipelineOrchestrator:
         )
         return transcript
 
-    def _step_segment(self, transcript: TranscriptionResult) -> list:
-        """Segment transcript into content types (including ads)."""
-        logger.info("Segmenting transcript...")
-        return self.segmenter.segment(transcript)
-
     def _step_identify_speakers(
         self, transcript: TranscriptionResult, content_segments: list, episode_id: int
     ) -> dict:
-        """Identify all speakers using cross-speaker name mentions in non-ad segments."""
+        """Identify all speakers using cross-speaker name mentions."""
         logger.info("Identifying speakers...")
         with get_session() as session:
             speaker_identities = self.speaker_identifier.identify_speakers(
@@ -422,28 +433,19 @@ class PipelineOrchestrator:
             session.commit()
         return speaker_identities
 
-    def _step_topics(self, content_segments: list) -> list:
-        """Extract topics from non-ad segments."""
-        logger.info("Extracting topics...")
-        return self.topic_extractor.extract_topics(content_segments)
-
-    def _step_sentiment(self, topic_analyses: list) -> list:
-        """Analyze sentiment."""
-        logger.info("Analyzing sentiment...")
-        return self.sentiment_analyzer.analyze_sentiments(topic_analyses)
+    def _step_thematic(self, transcript: TranscriptionResult) -> list[TopicAnalysis]:
+        """Run the Thematic Intelligence pipeline (segment → merge → analyze)."""
+        logger.info("Running thematic analysis...")
+        return self.thematic_analyzer.analyze(transcript)
 
     def _step_store(
         self,
         episode_id: int,
         transcript: TranscriptionResult,
-        segments: list,
-        topic_analyses: list,
-        sentiment_analyses: list,
+        topic_analyses: list[TopicAnalysis],
     ) -> dict:
-        """Store results to database."""
-        logger.info("Storing results to database...")
-
-        ads_report = aggregate_ads(segments, transcript.duration)
+        """Store thematic results to database."""
+        logger.info("Storing thematic results to database...")
 
         with get_session() as session:
             episode = session.query(Episode).filter_by(id=episode_id).first()
@@ -451,17 +453,6 @@ class PipelineOrchestrator:
             episode.word_count = transcript.word_count
             episode.raw_text = transcript.raw_text
 
-            store_episode_results(
-                session,
-                episode,
-                segments,
-                topic_analyses,
-                sentiment_analyses,
-                ads_report.ad_count,
-                ads_report.ad_percentage,
-            )
+            store_thematic_results(session, episode, topic_analyses)
 
-        return {
-            "ads_count": ads_report.ad_count,
-            "ads_percentage": ads_report.ad_percentage,
-        }
+        return {"merged_topics": len(topic_analyses)}

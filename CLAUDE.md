@@ -79,6 +79,7 @@ mypy src/
   - `chunker.py` — `chunk_audio()` splits long files into 25-min pieces with 1-min overlap
 - **`recorder/`**:
   - `capture.py` — `record_station(station, output_path, duration_seconds)` via ffmpeg with custom Referer/User-Agent headers (bypasses geo-blocking)
+  - `downloader.py` — `download_episode(url, output_path, ...)` downloads a recorded episode from any URL; uses ffmpeg by default (supports HLS/RTMP/direct files), falls back to plain HTTP
   - `streams.py` — Registry of Galatz, Kan Bet, 103FM with health checks
 - **`analysis/`** — Segmentation, topic extraction, guest identification, sentiment analysis
 - **`dashboard/`** — Streamlit multi-page app (Overview, Episodes, Guests, Topics, Sentiment)
@@ -126,11 +127,13 @@ scancel <JOBID>
 
 ✅ Transcription + diarization v4 (working — Pyannote community model)
 ✅ Recording from streams (working — verified on Galatz with geo-blocking bypass)
+✅ Episode download by URL (working — `downloader.py`, ffmpeg + HTTP fallback)
 ✅ SLURM job submission (working — `.claude/run_gpu_test.slurm`)
-✅ Analysis modules (working — Claude Sonnet for segmentation/topics/guests/sentiment)
+✅ Analysis modules (working — Claude Sonnet for segmentation/topics/guests/sentiment/thematic)
 ✅ Pipeline orchestration (working — full E2E with checkpoint recovery)
 ✅ Database layer (working — SQLAlchemy with SQLite for testing, PostgreSQL for production)
 ✅ Dashboard (working — Streamlit multi-page with 5 analysis views)
+✅ Speaker re-identification (working — clustering utility across episodes)
 ⏳ Daily automation (TODO — CLI + SLURM job for 3 stations in parallel)
 ⏳ Political leaning (TODO — Claude Opus classifier with Israeli context)
 
