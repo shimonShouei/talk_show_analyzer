@@ -23,21 +23,22 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 cp .env.example .env  # Add HF_TOKEN, DATABASE_URL, ANTHROPIC_API_KEY
 ```
 
-**Run E2E test (record + transcribe + analyze + dashboard):**
+**Run tests:**
 ```bash
-# Complete pipeline test with dashboard
-python test_e2e_with_dashboard.py
+# Complete E2E pipeline test with dashboard
+python tests/test_e2e.py
 
-# Or just record + transcribe (5 min)
-python test_e2e.py
+# GPU environment validation
+python tests/test_gpu_setup.py
 
 # Submit to SLURM cluster
-sbatch .claude/run_gpu_test.slurm
+sbatch slurm/run_gpu_test.slurm
+sbatch --export=STATION=103fm,DURATION=900 slurm/run_pipeline.slurm
 ```
 
-**Validate setup:**
+**Dashboard:**
 ```bash
-python test_gpu_setup.py
+python scripts/run_dashboard.py
 ```
 
 **Database configuration:**
@@ -81,10 +82,20 @@ mypy src/
   - `capture.py` — `record_station(station, output_path, duration_seconds)` via ffmpeg with custom Referer/User-Agent headers (bypasses geo-blocking)
   - `downloader.py` — `download_episode(url, output_path, ...)` downloads a recorded episode from any URL; uses ffmpeg by default (supports HLS/RTMP/direct files), falls back to plain HTTP
   - `streams.py` — Registry of Galatz, Kan Bet, 103FM with health checks
-- **`analysis/`** — Segmentation, topic extraction, guest identification, sentiment analysis
+- **`analysis/`** — Thematic analysis (active) + legacy modules (deprecated)
+  - `thematic_analyzer.py` — ⭐ Active: 3-stage topic-first intelligence
+  - `legacy/` — Deprecated: segmenter, topics, sentiment, guests, ads (kept for reference)
+  - `utils.py` — Shared utilities (sliding window functions)
+  - `prompts/` — Claude API prompt templates
+- **`identification/`** — Speaker re-identification across episodes
 - **`dashboard/`** — Streamlit multi-page app (Overview, Episodes, Guests, Topics, Sentiment)
 - **`pipeline/`** — Orchestrator with checkpoint-based recovery, database persistence
 - **`db.py`** — SQLAlchemy engine + session management
+
+**Tests, scripts, and SLURM jobs** (organized in dedicated directories):
+- **`tests/`** — Test suite with shared fixtures
+- **`scripts/`** — Utility scripts (dashboard launcher, reidentify, examples)
+- **`slurm/`** — Parameterized SLURM job templates
 
 ## SLURM Cluster Notes (BGU)
 
@@ -95,8 +106,23 @@ mypy src/
 
 **Submit job:**
 ```bash
-sbatch .claude/run_gpu_test.slurm  # Edit GPU type/walltime in script header
+# GPU validation
+sbatch slurm/run_gpu_test.slurm
+
+# Main pipeline: 103FM for 15 minutes
+sbatch --export=STATION=103fm,DURATION=900 slurm/run_pipeline.slurm
+
+# Kan Bet for 30 minutes
+sbatch --export=STATION=kan_bet,DURATION=1800 slurm/run_pipeline.slurm
+
+# E2E test
+sbatch slurm/run_e2e_test.slurm
+
+# Re-analyze episode 2
+sbatch --export=EPISODE_ID=2 slurm/reanalyze.slurm
 ```
+
+See `.claude/SLURM_MIGRATION.md` for detailed parameter documentation.
 
 **Monitor:**
 ```bash
@@ -128,7 +154,7 @@ scancel <JOBID>
 ✅ Transcription + diarization v4 (working — Pyannote community model)
 ✅ Recording from streams (working — verified on Galatz with geo-blocking bypass)
 ✅ Episode download by URL (working — `downloader.py`, ffmpeg + HTTP fallback)
-✅ SLURM job submission (working — `.claude/run_gpu_test.slurm`)
+✅ SLURM job submission (working — parameterized templates in `slurm/`)
 ✅ Analysis modules (working — Claude Sonnet for segmentation/topics/guests/sentiment/thematic)
 ✅ Pipeline orchestration (working — full E2E with checkpoint recovery)
 ✅ Database layer (working — SQLAlchemy with SQLite for testing, PostgreSQL for production)
