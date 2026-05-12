@@ -596,8 +596,14 @@ class PipelineOrchestrator:
         self._persist_parts(episode_id, parts)
 
         # --- Thematic Stage 2 + 3 ---
-        thematic_chunks = chunk_analyses_to_thematic_chunks(chunk_analyses, transcript)
-        logger.info(f"Thematic: {len(thematic_chunks)} topic chunks from {len(chunk_analyses)} windows")
+        # Exclude non-content windows (ads, news, jingles) from topic analysis
+        _SKIP_TYPES = {"commercial", "jingle", "news"}
+        content_chunks = [ca for ca in chunk_analyses if ca.part_type not in _SKIP_TYPES]
+        skipped = len(chunk_analyses) - len(content_chunks)
+        if skipped:
+            logger.info(f"Thematic: skipping {skipped} non-content window(s) (ads/news/jingles)")
+        thematic_chunks = chunk_analyses_to_thematic_chunks(content_chunks, transcript)
+        logger.info(f"Thematic: {len(thematic_chunks)} topic chunks from {len(content_chunks)} content windows")
 
         topic_analyses: list[TopicAnalysis] = []
         if thematic_chunks:

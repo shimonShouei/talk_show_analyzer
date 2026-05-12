@@ -5,13 +5,14 @@ identification stage, this module groups segments into structural parts:
 
   - INTERVIEW   — host(s) and at least one non-host speaker active together
   - HOST_TALK   — only host speakers active (transition / monologue / open)
+  - NEWS        — structured news bulletin (no host participation)
+  - COMMERCIAL  — advertisement block
+  - JINGLE      — short station ident / musical sting
   - UNKNOWN     — neither host nor guest classified (rare)
 
-Detection is heuristic and uses only the role labels already produced by the
-identification stage. NEWS / JINGLE / COMMERCIAL detection requires acoustic
-features (or an LLM pass over the text) and is deferred — the enum slots are
-reserved so downstream code can opt into those types later without a model
-change.
+segment_into_parts() uses role labels from the identification stage (heuristic).
+assemble_parts_from_chunks() uses LLM-classified part_type from ChunkAnalyzer,
+which also detects news/commercial/jingle from transcript content patterns.
 
 Algorithm:
   1. Classify each diarized segment by inspecting the speaker cohort within a
@@ -38,9 +39,9 @@ class PartType(str, Enum):
 
     INTERVIEW = "interview"
     HOST_TALK = "host_talk"
-    NEWS = "news"            # reserved — not auto-detected yet
-    JINGLE = "jingle"        # reserved — not auto-detected yet
-    COMMERCIAL = "commercial"  # reserved — not auto-detected yet
+    NEWS = "news"
+    JINGLE = "jingle"
+    COMMERCIAL = "commercial"
     UNKNOWN = "unknown"
 
 
@@ -240,12 +241,9 @@ def assemble_parts_from_chunks(
 
     parts = _merge_short_parts_by_type(parts, min_part_duration_s)
 
-    logger.info(
-        f"assemble_parts_from_chunks: {len(parts)} part(s) — "
-        f"{sum(1 for p in parts if p.type == PartType.INTERVIEW)} interview, "
-        f"{sum(1 for p in parts if p.type == PartType.HOST_TALK)} host_talk, "
-        f"{sum(1 for p in parts if p.type == PartType.UNKNOWN)} unknown"
-    )
+    counts = {pt: sum(1 for p in parts if p.type == pt) for pt in PartType}
+    summary = ", ".join(f"{c} {pt.value}" for pt, c in counts.items() if c > 0)
+    logger.info(f"assemble_parts_from_chunks: {len(parts)} part(s) — {summary}")
     return parts
 
 

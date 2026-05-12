@@ -49,9 +49,12 @@ Identify topic-coherent sub-segments within this window. A new topic starts when
 Classify the overall nature of this segment (ignore media_clip speakers — they are not live participants):
 - "interview" — a host is interviewing an EXTERNAL guest or a caller (someone from outside the studio)
 - "host_talk" — only the regular show hosts are present (co-hosts discussing, monologue, transition, intro/outro, or playing clips). Two hosts talking to each other = host_talk. Hosts + media_clips only = host_talk.
+- "news" — a structured news bulletin: formulaic Hebrew ("חדשות", "בשעה X", "מערכת החדשות"), anchor read with reporter sign-offs, no host participation
+- "commercial" — advertisement block: brand names, phone numbers, prices, "התקשרו עכשיו", "בחסות", jingle stings between ads, clearly not show content
+- "jingle" — very short station ident or musical sting; transcript is near-empty, garbled, or just sound descriptions
 - "unknown" — cannot determine
 
-Key rule: if all LIVE speakers are hosts (guests/callers = 0), classify as "host_talk". "interview" requires a live non-host participant.
+Key rule: if all LIVE speakers are hosts (guests/callers = 0), classify as "host_talk". "interview" requires a live non-host participant. Prioritize "news"/"commercial"/"jingle" over "host_talk" when the content clearly matches those patterns.
 
 ## JSON Schema
 
@@ -243,7 +246,7 @@ class ChunkAnalyzer:
                 logger.debug(f"Skipping malformed topic item: {e}")
 
         part_type = str(data.get("part_type", "unknown")).lower()
-        if part_type not in ("interview", "host_talk", "unknown"):
+        if part_type not in ("interview", "host_talk", "news", "commercial", "jingle", "unknown"):
             part_type = "unknown"
 
         return ChunkAnalysis(
