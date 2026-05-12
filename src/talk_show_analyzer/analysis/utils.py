@@ -1,9 +1,37 @@
 """Shared utilities for analysis modules."""
 
+import json
+import re
+from typing import Any
+
 from talk_show_analyzer.transcription.transcriber import (
     SpeakerSegment,
     TranscriptionResult,
 )
+
+
+def extract_fenced_json(text: str) -> Any:
+    """Pull the first ```json...``` block out of a CoT-style response.
+
+    Strips an optional `<thinking>...</thinking>` preamble, then parses the
+    first fenced block. Falls back to the raw text if no fence is present.
+    """
+    if not text or not text.strip():
+        raise ValueError("empty response from model")
+    cleaned = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL).strip()
+    fence = re.search(r"```(?:json)?\s*(.+?)\s*```", cleaned, flags=re.DOTALL)
+    payload = fence.group(1) if fence else cleaned
+    return json.loads(payload)
+
+
+def safe_response_text(response) -> str:
+    """Extract text from a Claude response, raising ValueError if empty."""
+    if not response.content:
+        raise ValueError(f"empty content list (stop_reason={response.stop_reason!r})")
+    text = response.content[0].text
+    if not text or not text.strip():
+        raise ValueError(f"empty response text (stop_reason={response.stop_reason!r})")
+    return text
 
 
 def create_sliding_windows(

@@ -16,8 +16,7 @@ contract for everything downstream (DB persistence, dashboard, exports).
 from __future__ import annotations
 
 import json
-import re
-from typing import Any, Literal
+from typing import Literal
 
 import anthropic
 import numpy as np
@@ -37,7 +36,11 @@ from talk_show_analyzer.analysis.prompts.thematic import (
     format_local_window,
     format_merged_topic_for_analysis,
 )
-from talk_show_analyzer.analysis.utils import create_sliding_windows
+from talk_show_analyzer.analysis.utils import (
+    create_sliding_windows,
+    extract_fenced_json,
+    safe_response_text,
+)
 
 
 # =============================================================================
@@ -120,36 +123,12 @@ class TopicAnalysis(BaseModel):
     entities: list[Entity] = Field(default_factory=list)
     hate_speech_incidents: list[HateSpeechIncident] = Field(default_factory=list)
     speaker_insights: dict[str, SpeakerInsight] = Field(default_factory=dict)
+    part_idx: int | None = None
 
 
 # =============================================================================
 # Internal helpers
 # =============================================================================
-
-
-def _extract_fenced_json(text: str) -> Any:
-    """Pull the first ```json...``` block out of a CoT response.
-
-    The agent reasons inside <thinking>...</thinking> and emits the answer in
-    a fenced JSON block. We strip the thinking, then parse the first fence.
-    Falls back to the raw text if no fence is present.
-    """
-    if not text or not text.strip():
-        raise ValueError("empty response from model")
-    cleaned = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL).strip()
-    fence = re.search(r"```(?:json)?\s*(.+?)\s*```", cleaned, flags=re.DOTALL)
-    payload = fence.group(1) if fence else cleaned
-    return json.loads(payload)
-
-
-def _safe_response_text(response) -> str:
-    """Extract text from a Claude response, raising ValueError if empty."""
-    if not response.content:
-        raise ValueError(f"empty content list (stop_reason={response.stop_reason!r})")
-    text = response.content[0].text
-    if not text or not text.strip():
-        raise ValueError(f"empty response text (stop_reason={response.stop_reason!r})")
-    return text
 
 
 class _UnionFind:
@@ -226,6 +205,44 @@ class ThematicAnalyzer:
         logger.info(f"ThematicAnalyzer: completed {len(analyses)} topic analyses")
         return analyses
 
+    def analyze_part(self, part) -> list[TopicAnalysis]:
+        """Run the 3-stage pipeline on a single structural Part.
+
+        Returns [] if the part is too short (<60s) or has <3 segments.
+        The Part type (interview, host_talk, etc.) is NOT a filter — all
+        substantive parts are analyzed.
+        """
+        # Import here to avoid circular imports at module load time.
+        from talk_show_analyzer.analysis.structural_segmenter import Part  # noqa: F401
+
+        if part.duration < 60 or len(part.segments) < 3:
+            logger.info(
+                f"analyze_part: skipping {part.type.value} part "
+                f"({part.duration:.0f}s, {len(part.segments)} segs) — too short"
+            )
+            return []
+
+        synthetic = self._part_to_transcript(part)
+        logger.info(
+            f"analyze_part: {part.type.value} {part.start:.0f}-{part.end:.0f}s "
+            f"({len(part.segments)} segs)"
+        )
+        return self.analyze(synthetic)
+
+    @staticmethod
+    def _part_to_transcript(part) -> TranscriptionResult:
+        """Build a synthetic TranscriptionResult from a Part's segments."""
+        raw_text = " ".join(s.text for s in part.segments if s.text)
+        word_count = len(raw_text.split())
+        return TranscriptionResult(
+            raw_text=raw_text,
+            language="he",
+            duration=part.end - part.start,
+            word_count=word_count,
+            segments=part.segments,
+            speaker_embeddings={},
+        )
+
     # ----------------------------------------------------- Stage 1: local seg
 
     def _local_segment(self, transcript: TranscriptionResult) -> list[dict]:
@@ -278,7 +295,7 @@ class ThematicAnalyzer:
                     }
                 ],
             )
-            data = _extract_fenced_json(_safe_response_text(response))
+            data = extract_fenced_json(safe_response_text(response))
         except (json.JSONDecodeError, anthropic.APIError, ValueError) as e:
             logger.warning(f"Local segmentation failed for window: {e}")
             return []
@@ -440,7 +457,7 @@ class ThematicAnalyzer:
                 ],
                 messages=[{"role": "user", "content": user_msg}],
             )
-            data = _extract_fenced_json(_safe_response_text(response))
+            data = extract_fenced_json(safe_response_text(response))
         except (json.JSONDecodeError, anthropic.APIError, ValueError) as e:
             logger.warning(
                 f"LLM joiner failed ({e}); falling back to embedding groups"
@@ -548,7 +565,7 @@ class ThematicAnalyzer:
                 ],
                 messages=messages,
             )
-            data = _extract_fenced_json(_safe_response_text(response))
+            data = extract_fenced_json(safe_response_text(response))
         except (json.JSONDecodeError, anthropic.APIError, ValueError) as e:
             logger.error(f"Deep analysis call failed for {merged['topic_id']}: {e}")
             return None

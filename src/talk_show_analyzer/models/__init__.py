@@ -425,6 +425,49 @@ class SpeakerInsightORM(Base):
         )
 
 
+class PartORM(Base):
+    """One structural part of an episode (interview / host_talk / etc.).
+
+    Produced by `analysis.structural_segmenter.segment_into_parts`. Subsequent
+    per-part analyses (Q&A pair extraction, per-speaker hate scoring, thematic)
+    foreign-key into this table.
+    """
+
+    __tablename__ = "parts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    episode_id: Mapped[int] = mapped_column(ForeignKey("episodes.id"), nullable=False)
+    idx: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )  # ordinal position within the episode (0-based)
+    type: Mapped[str] = mapped_column(
+        String(50), nullable=False
+    )  # interview | host_talk | news | jingle | commercial | unknown
+    start_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    end_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    host_labels: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    guest_labels: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    unknown_labels: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+
+    episode: Mapped["Episode"] = relationship("Episode")
+
+    __table_args__ = (
+        Index("idx_parts_episode", "episode_id"),
+        Index("idx_parts_episode_idx", "episode_id", "idx", unique=True),
+        Index("idx_parts_type", "type"),
+    )
+
+    @property
+    def duration(self) -> float:
+        return self.end_seconds - self.start_seconds
+
+    def __repr__(self) -> str:
+        return (
+            f"<PartORM ep={self.episode_id} idx={self.idx} {self.type} "
+            f"{self.start_seconds:.0f}-{self.end_seconds:.0f}s>"
+        )
+
+
 __all__ = [
     "Base",
     "Station",
@@ -441,4 +484,5 @@ __all__ = [
     "TopicEntity",
     "HateSpeechIncidentORM",
     "SpeakerInsightORM",
+    "PartORM",
 ]

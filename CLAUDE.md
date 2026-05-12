@@ -52,6 +52,16 @@ DATABASE_URL=postgresql://user:password@db-host/talk_show_analyzer
 
 ⚠️ **Database setup**: `.env` is in `.gitignore` and must be created locally. For SLURM jobs, use SQLite (`sqlite:///./talk_show.db`) since compute nodes cannot easily reach external database servers. For production, switch to PostgreSQL and ensure the database server is accessible from the cluster.
 
+**Create / migrate tables:**
+```bash
+# Quick path (SQLite, local dev): create_all on whatever DATABASE_URL points to
+python scripts/init_db.py
+
+# Production path (PostgreSQL): alembic-managed migrations
+alembic upgrade head
+```
+The `parts` table was added in revision `002` — run one of the above before processing any new episode after pulling.
+
 **Code quality:**
 ```bash
 black src/
@@ -61,14 +71,19 @@ mypy src/
 
 ## Project Overview
 
-**Israeli Talk Show Analyzer** — Daily automated recording, transcription, and analysis of Israeli radio talk shows (Galatz, 103FM, Kan Reshet Bet). Pipeline:
+**Israeli Talk Show Analyzer** — Daily automated recording, transcription, and analysis of Israeli radio talk shows (Galatz, 103FM, Kan Reshet Bet). Pipeline (order is enforced by `PipelineOrchestrator.STEPS`):
 
-1. **Recording**: ffmpeg captures audio from 3 stations
-2. **Transcription**: Faster-Whisper (free, self-hosted) for Hebrew + Pyannote diarization
-3. **Chunking**: Long recordings split into 25-min pieces
-4. **Analysis**: Claude API for guests, topics, sentiment, political leaning (TODO)
-5. **Storage**: PostgreSQL (TODO)
-6. **Dashboard**: Streamlit (TODO)
+1. **record** — ffmpeg captures audio from 3 stations
+2. **transcribe** — Faster-Whisper (Hebrew) + Pyannote diarization → `TranscriptionResult`
+3. **identify_speakers** — `UnifiedSpeakerIdentifier` resolves each diarization label to a Person (host/guest/caller/unknown) via cross-speaker LLM analysis
+4. **resolve_hosts** — `HostResolver` matches identified hosts against the day's station schedule (scraped per-station) and flags substitutes / missing regulars
+5. **structural_segment** — `segment_into_parts()` groups the transcript into structural Parts (`interview` / `host_talk` / reserved: `news`/`jingle`/`commercial` / `unknown`) using role labels + a windowed classifier. Persists `parts` rows.
+6. **thematic** — `ThematicAnalyzer.analyze_part()` runs the 3-stage topic-first analysis *per part* (so unrelated interviews don't get merged); falls back to whole-transcript `analyze()` when no parts exist.
+7. **store** — Persists topic analyses + per-speaker insights + hate-speech incidents.
+
+Additional analyzers (called outside the orchestrator for now):
+- `NamedQAExtractor` — extracts Q&A pairs from interview parts
+- `SpeakerPartAnalyzer` — per-(part, speaker) hate scoring + stance summary
 
 ## Architecture & Key Modules
 
@@ -82,14 +97,23 @@ mypy src/
   - `capture.py` — `record_station(station, output_path, duration_seconds)` via ffmpeg with custom Referer/User-Agent headers (bypasses geo-blocking)
   - `downloader.py` — `download_episode(url, output_path, ...)` downloads a recorded episode from any URL; uses ffmpeg by default (supports HLS/RTMP/direct files), falls back to plain HTTP
   - `streams.py` — Registry of Galatz, Kan Bet, 103FM with health checks
-- **`analysis/`** — Thematic analysis (active) + legacy modules (deprecated)
-  - `thematic_analyzer.py` — ⭐ Active: 3-stage topic-first intelligence
-  - `legacy/` — Deprecated: segmenter, topics, sentiment, guests, ads (kept for reference)
-  - `utils.py` — Shared utilities (sliding window functions)
+- **`analysis/`** — All post-transcription analyzers
+  - `structural_segmenter.py` — `Part` dataclass + `segment_into_parts()` (host/guest role + windowed classifier)
+  - `thematic_analyzer.py` — 3-stage topic-first intelligence; `analyze_part()` runs per-Part, `analyze()` kept for whole-transcript backwards compat
+  - `qa_extractor.py` — `NamedQAExtractor` extracts named Q&A pairs from interview parts (one LLM call per part)
+  - `speaker_part_analyzer.py` — `SpeakerPartAnalyzer` produces per-(part, speaker) hate score + incidents + stance (one LLM call per part)
+  - `legacy/` — Deprecated: segmenter, topics, sentiment, guests, ads (kept until dashboard migrates off)
+  - `utils.py` — Shared utilities: `create_sliding_windows`, `extract_fenced_json`, `safe_response_text`
   - `prompts/` — Claude API prompt templates
-- **`identification/`** — Speaker re-identification across episodes
-- **`dashboard/`** — Streamlit multi-page app (Overview, Episodes, Guests, Topics, Sentiment)
-- **`pipeline/`** — Orchestrator with checkpoint-based recovery, database persistence
+- **`identification/`**
+  - `llm_identifier.py` — `UnifiedSpeakerIdentifier` cross-speaker name-mention identification
+  - `host_resolver.py` — `HostResolver` matches identified hosts against the day's schedule
+- **`recorder/`**
+  - `streams.py`, `capture.py`, `downloader.py` — see file headers
+  - `schedules/` — per-station weekly schedule scrapers. `base.py` defines `ScheduleProvider` ABC + `get_scheduled_show()`. Currently implemented: `fm103.py` (103FM). Galatz blocked by Incapsula, Kan Bet returns 403 — both pending.
+- **`dashboard/`** — Streamlit multi-page app (Overview, Episodes, Guests, Topics, Sentiment, **Parts Timeline**)
+- **`pipeline/`** — `PipelineOrchestrator` with checkpoint-based recovery. STEPS = `["record", "transcribe", "identify_speakers", "resolve_hosts", "structural_segment", "thematic", "store"]`. New steps reload state from DB on resume (see `_load_resolved_speakers`, `_load_parts`).
+- **`models/`** — SQLAlchemy ORM. New: `PartORM` (table `parts`).
 - **`db.py`** — SQLAlchemy engine + session management
 
 **Tests, scripts, and SLURM jobs** (organized in dedicated directories):

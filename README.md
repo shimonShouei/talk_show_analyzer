@@ -6,24 +6,28 @@ Automated daily recording, transcription, and analysis of Israeli radio talk sho
 
 - **Free speech-to-text**: Faster-Whisper + Pyannote (self-hosted, no API costs)
 - **Hebrew support**: Native transcription and analysis
-- **Speaker identification**: Automatic diarization + re-identification across episodes
-- **Episode download**: Fetch recorded episodes from any URL (HLS, direct MP3, etc.)
-- **Analysis**: Guest identification, topic/thematic extraction, sentiment analysis
-- **Dashboard**: Streamlit multi-page visualization (overview, episodes, guests, topics, sentiment)
-- **Pipeline**: Checkpoint-based orchestration with database persistence
+- **Speaker identification**: Cross-speaker LLM name-mention identification (host/guest/caller)
+- **Host verification**: Per-station weekly schedule scrapers detect host substitutions
+- **Structural segmentation**: Splits each episode into Parts (interview / host_talk / …) for per-part analysis
+- **Per-(part, speaker) analysis**: Hate scoring + stance + named Q&A pairs scoped to each interview, not the whole episode
+- **Dashboard**: Streamlit multi-page visualization (overview, episodes, guests, topics, sentiment, **parts timeline**)
+- **Pipeline**: Checkpoint-based orchestration with DB persistence and resumable recovery
 
 ## Architecture
 
 ```
-[Cron 05:50 IST] → [Record 3 streams via ffmpeg ~4hrs]  OR  [Download episode by URL]
-    → [Chunk audio into 25-min pieces]
-    → [Faster-Whisper transcription (Hebrew) + Pyannote diarization]
-    → [Claude API analysis: segments, guests, topics, sentiment]
-    → [Store in SQLite / PostgreSQL]
-    → [Streamlit dashboard]
+[Cron 05:50 IST]
+   → [record]            ffmpeg captures stream
+   → [transcribe]        Faster-Whisper + Pyannote diarization
+   → [identify_speakers] UnifiedSpeakerIdentifier (cross-speaker LLM)
+   → [resolve_hosts]     match identified hosts vs. station schedule
+   → [structural_segment] interview / host_talk / unknown Parts
+   → [thematic]          ThematicAnalyzer per Part (topics, entities, hate)
+   → [store]             persist to SQLite / PostgreSQL
+   → [dashboard]         Streamlit
 ```
 
-**Cost**: ~$16-22/day (Claude API only; transcription is free and self-hosted)
+**Budget**: ~$0.90/episode for the LLM stages (thematic + Q&A + per-speaker), well under the $2/episode target.
 
 ## Setup
 
@@ -57,6 +61,16 @@ DATABASE_URL=sqlite:///./talk_show.db
 
 # Production
 DATABASE_URL=postgresql://user:password@db-host/talk_show_analyzer
+```
+
+Create / migrate the schema once before processing episodes:
+
+```bash
+# Quick path: create_all (SQLite, local dev, SLURM)
+python scripts/init_db.py
+
+# Production: alembic-managed migrations
+alembic upgrade head
 ```
 
 ## Usage
@@ -116,17 +130,24 @@ talk_show_analyzer/
 │   │   ├── chunker.py              # Audio chunking (25-min pieces, 1-min overlap)
 │   │   └── speaker_linking.py      # Cross-chunk speaker label merging
 │   ├── analysis/
-│   │   ├── thematic_analyzer.py    # ⭐ Active: topic-first 3-stage analyzer
-│   │   ├── utils.py                # Shared utilities (sliding windows)
-│   │   ├── legacy/                 # Deprecated: old pipeline (segmenter, topics, sentiment, guests, ads)
+│   │   ├── structural_segmenter.py # Group transcript into Parts (interview/host_talk/…)
+│   │   ├── thematic_analyzer.py    # 3-stage topic-first analyzer; runs per-Part
+│   │   ├── qa_extractor.py         # Named Q&A pairs per interview Part
+│   │   ├── speaker_part_analyzer.py # Per-(Part, speaker) hate score + stance
+│   │   ├── utils.py                # Shared utilities (windows, JSON helpers)
+│   │   ├── legacy/                 # Deprecated: kept until dashboard fully migrates
 │   │   └── prompts/                # Prompt templates for Claude API
 │   ├── identification/
-│   │   └── llm_identifier.py       # Speaker re-identification across episodes
+│   │   ├── llm_identifier.py       # Cross-speaker LLM name-mention identification
+│   │   └── host_resolver.py        # Match identified hosts vs. station schedule
+│   ├── recorder/
+│   │   ├── capture.py / downloader.py / streams.py
+│   │   └── schedules/              # Per-station weekly schedule scrapers (103fm.py)
 │   ├── pipeline/
-│   │   ├── orchestrator.py         # End-to-end pipeline with checkpoint recovery
+│   │   ├── orchestrator.py         # 7-step pipeline with checkpoint recovery
 │   │   └── store.py                # Database persistence
-│   ├── dashboard/                  # Streamlit multi-page app
-│   ├── models/                     # SQLAlchemy ORM models
+│   ├── dashboard/                  # Streamlit multi-page app (incl. Parts Timeline)
+│   ├── models/                     # SQLAlchemy ORM models (incl. PartORM)
 │   └── db.py                       # SQLAlchemy engine + session
 ├── tests/                          # Test suite
 │   ├── conftest.py                 # Shared fixtures (transcript loading)
@@ -135,6 +156,7 @@ talk_show_analyzer/
 │   ├── test_e2e.py                 # Full E2E pipeline test
 │   └── test_speaker_*.py           # Speaker identification tests
 ├── scripts/                        # Utility scripts
+│   ├── init_db.py                  # One-shot Base.metadata.create_all (SQLite dev)
 │   ├── run_dashboard.py            # Streamlit dashboard launcher
 │   ├── reidentify_speakers.py      # Re-run speaker ID on existing episodes
 │   └── example_transcribe.py       # Transcription example

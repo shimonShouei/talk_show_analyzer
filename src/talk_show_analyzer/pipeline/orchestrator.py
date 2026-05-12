@@ -10,17 +10,23 @@ from sqlalchemy.orm import Session
 
 from talk_show_analyzer.config import settings
 from talk_show_analyzer.db import get_session
-from talk_show_analyzer.models import Episode, PipelineRun, Station
+from talk_show_analyzer.models import Episode, PartORM, PipelineRun, SpeakerIdentity, Station
 from talk_show_analyzer.recorder import record_station
 from talk_show_analyzer.transcription import Transcriber
 from talk_show_analyzer.analysis import ThematicAnalyzer
+from talk_show_analyzer.analysis.structural_segmenter import Part, segment_into_parts
 from talk_show_analyzer.analysis.thematic_analyzer import TopicAnalysis
 from talk_show_analyzer.identification import UnifiedSpeakerIdentifier
+from talk_show_analyzer.identification.host_resolver import HostResolution, HostResolver
+from talk_show_analyzer.identification.llm_identifier import ResolvedSpeaker
 from talk_show_analyzer.transcription.transcriber import (
     TranscriptionResult,
     SpeakerSegment,
 )
 from talk_show_analyzer.pipeline.store import store_thematic_results
+
+# Make sure schedule providers (e.g. 103fm) are registered at import time.
+import talk_show_analyzer.recorder.schedules  # noqa: F401
 
 
 class PipelineOrchestrator:
@@ -30,6 +36,8 @@ class PipelineOrchestrator:
         "record",
         "transcribe",
         "identify_speakers",
+        "resolve_hosts",
+        "structural_segment",
         "thematic",
         "store",
     ]
@@ -41,6 +49,7 @@ class PipelineOrchestrator:
             compute_type=settings.whisper_compute_type,
         )
         self.speaker_identifier = UnifiedSpeakerIdentifier()
+        self.host_resolver = HostResolver()
         self.thematic_analyzer = ThematicAnalyzer()
 
     def run(
@@ -67,15 +76,16 @@ class PipelineOrchestrator:
         logger.info(f"PIPELINE START: {station.upper()}")
         logger.info(f"{'='*60}\n")
 
+        recorded_at = datetime.utcnow()
         with get_session() as session:
             # Create or get station
             db_station = self._get_or_create_station(session, station)
 
             # Create episode record
-            audio_path = output_dir / f"{station}_{datetime.utcnow().isoformat()}.mp3"
+            audio_path = output_dir / f"{station}_{recorded_at.isoformat()}.mp3"
             episode = Episode(
                 station_id=db_station.id,
-                recorded_at=datetime.utcnow(),
+                recorded_at=recorded_at,
                 duration=0,
                 audio_path=str(audio_path),
                 language="he",
@@ -113,15 +123,31 @@ class PipelineOrchestrator:
                     transcript, transcript.segments, episode_id
                 ),
             )
+            if speaker_identities is None:
+                speaker_identities = self._load_resolved_speakers(episode_id)
 
-            # Step 4: Thematic Intelligence pipeline (segment + merge + analyze)
+            # Step 4: Resolve hosts against the station schedule
+            host_resolution = self._run_step_with_checkpoint(
+                episode_id,
+                "resolve_hosts",
+                lambda: self._step_resolve_hosts(station, recorded_at, speaker_identities),
+            )
+
+            # Step 5: Structural segmentation into parts (interview vs host_talk)
+            parts = self._run_step_with_checkpoint(
+                episode_id,
+                "structural_segment",
+                lambda: self._step_structural_segment(transcript, speaker_identities, episode_id),
+            )
+
+            # Step 6: Thematic Intelligence pipeline (segment + merge + analyze)
             topic_analyses = self._run_step_with_checkpoint(
                 episode_id,
                 "thematic",
-                lambda: self._step_thematic(transcript),
+                lambda: self._step_thematic(transcript, parts),
             )
 
-            # Step 5: Store
+            # Step 7: Store
             self._run_step_with_checkpoint(
                 episode_id,
                 "store",
@@ -182,11 +208,12 @@ class PipelineOrchestrator:
         logger.info(f"PIPELINE START (from file): {audio_path.name}")
         logger.info(f"{'='*60}\n")
 
+        recorded_at = datetime.utcnow()
         with get_session() as session:
             db_station = self._get_or_create_station(session, station)
             episode = Episode(
                 station_id=db_station.id,
-                recorded_at=datetime.utcnow(),
+                recorded_at=recorded_at,
                 duration=0,
                 audio_path=str(audio_path),
                 language="he",
@@ -208,8 +235,20 @@ class PipelineOrchestrator:
                 "identify_speakers",
                 lambda: self._step_identify_speakers(transcript, transcript.segments, episode_id),
             )
+            if speaker_identities is None:
+                speaker_identities = self._load_resolved_speakers(episode_id)
+            host_resolution = self._run_step_with_checkpoint(
+                episode_id,
+                "resolve_hosts",
+                lambda: self._step_resolve_hosts(station, recorded_at, speaker_identities),
+            )
+            parts = self._run_step_with_checkpoint(
+                episode_id,
+                "structural_segment",
+                lambda: self._step_structural_segment(transcript, speaker_identities, episode_id),
+            )
             topic_analyses = self._run_step_with_checkpoint(
-                episode_id, "thematic", lambda: self._step_thematic(transcript)
+                episode_id, "thematic", lambda: self._step_thematic(transcript, parts)
             )
             self._run_step_with_checkpoint(
                 episode_id,
@@ -279,21 +318,47 @@ class PipelineOrchestrator:
 
         # Continue from where we left off
         try:
-            if not last_done or last_done == "transcribe":
-                speaker_identities = self._run_step_with_checkpoint(
-                    episode_id,
-                    "identify_speakers",
-                    lambda: self._step_identify_speakers(
-                        transcript, transcript.segments, episode_id
-                    ),
-                )
+            # Always (re)load speakers — needed by resolve_hosts and structural_segment.
+            speaker_identities = self._run_step_with_checkpoint(
+                episode_id,
+                "identify_speakers",
+                lambda: self._step_identify_speakers(
+                    transcript, transcript.segments, episode_id
+                ),
+            )
+            if speaker_identities is None:
+                speaker_identities = self._load_resolved_speakers(episode_id)
 
-            if not last_done or last_done in ["transcribe", "identify_speakers"]:
-                topic_analyses = self._run_step_with_checkpoint(
-                    episode_id,
-                    "thematic",
-                    lambda: self._step_thematic(transcript),
+            # Need station + recorded_at for host resolution; pull from DB.
+            with get_session() as session:
+                ep = session.query(Episode).filter_by(id=episode_id).first()
+                ep_recorded_at = ep.recorded_at
+                ep_station = (
+                    session.query(Station).filter_by(id=ep.station_id).first()
                 )
+                ep_station_name = ep_station.name if ep_station else "unknown"
+
+            self._run_step_with_checkpoint(
+                episode_id,
+                "resolve_hosts",
+                lambda: self._step_resolve_hosts(
+                    ep_station_name, ep_recorded_at, speaker_identities
+                ),
+            )
+
+            self._run_step_with_checkpoint(
+                episode_id,
+                "structural_segment",
+                lambda: self._step_structural_segment(transcript, speaker_identities, episode_id),
+            )
+
+            parts = self._load_parts(episode_id, transcript)
+
+            topic_analyses = self._run_step_with_checkpoint(
+                episode_id,
+                "thematic",
+                lambda: self._step_thematic(transcript, parts),
+            )
 
             self._run_step_with_checkpoint(
                 episode_id,
@@ -433,10 +498,137 @@ class PipelineOrchestrator:
             session.commit()
         return speaker_identities
 
-    def _step_thematic(self, transcript: TranscriptionResult) -> list[TopicAnalysis]:
-        """Run the Thematic Intelligence pipeline (segment → merge → analyze)."""
+    def _step_resolve_hosts(
+        self,
+        station: str,
+        recorded_at: datetime,
+        resolved_speakers: dict[str, ResolvedSpeaker],
+    ) -> HostResolution:
+        """Match scheduled hosts against the LLM-identified speakers."""
+        logger.info(f"Resolving hosts for {station} at {recorded_at.isoformat()}...")
+        res = self.host_resolver.resolve(station, recorded_at, resolved_speakers)
+        if res.schedule_available:
+            logger.info(
+                f"Show: {res.show_name!r} | expected={res.expected_hosts} | "
+                f"confirmed={res.confirmed} | substitutes={res.substitutes} | "
+                f"missing={res.missing_expected} | unknown={res.unknown_hosts}"
+            )
+        else:
+            logger.info("No schedule available for this station/time; skipping match.")
+        return res
+
+    def _step_structural_segment(
+        self,
+        transcript: TranscriptionResult,
+        resolved_speakers: dict[str, ResolvedSpeaker],
+        episode_id: int | None = None,
+    ) -> list[Part]:
+        """Group transcript segments into structural parts and persist them."""
+        logger.info("Segmenting transcript into structural parts...")
+        parts = segment_into_parts(transcript.segments, resolved_speakers)
+        for i, p in enumerate(parts):
+            logger.info(
+                f"  part {i}: {p.type.value} {p.start:.0f}–{p.end:.0f}s "
+                f"({p.duration:.0f}s) hosts={sorted(p.host_labels)} "
+                f"guests={sorted(p.guest_labels)}"
+            )
+        if episode_id is not None:
+            self._persist_parts(episode_id, parts)
+        return parts
+
+    def _persist_parts(self, episode_id: int, parts: list[Part]) -> None:
+        """Replace any existing parts for this episode with the new list."""
+        with get_session() as session:
+            session.query(PartORM).filter_by(episode_id=episode_id).delete()
+            for idx, p in enumerate(parts):
+                session.add(
+                    PartORM(
+                        episode_id=episode_id,
+                        idx=idx,
+                        type=p.type.value,
+                        start_seconds=p.start,
+                        end_seconds=p.end,
+                        host_labels=sorted(p.host_labels),
+                        guest_labels=sorted(p.guest_labels),
+                        unknown_labels=sorted(p.unknown_labels),
+                    )
+                )
+            session.commit()
+        logger.info(f"Persisted {len(parts)} part(s) for episode {episode_id}")
+
+    def _step_thematic(
+        self,
+        transcript: TranscriptionResult,
+        parts: list[Part] | None = None,
+    ) -> list[TopicAnalysis]:
+        """Run the Thematic Intelligence pipeline per-part (or whole-transcript fallback)."""
         logger.info("Running thematic analysis...")
-        return self.thematic_analyzer.analyze(transcript)
+        if not parts:
+            return self.thematic_analyzer.analyze(transcript)
+        all_analyses: list[TopicAnalysis] = []
+        for idx, part in enumerate(parts):
+            results = self.thematic_analyzer.analyze_part(part)
+            for ta in results:
+                ta.part_idx = idx
+            all_analyses.extend(results)
+        logger.info(f"Per-part thematic: {len(all_analyses)} topic analyses across {len(parts)} parts")
+        return all_analyses
+
+    def _load_parts(self, episode_id: int, transcript: TranscriptionResult) -> list[Part]:
+        """Reconstruct list[Part] from PartORM rows, re-attaching transcript segments."""
+        from talk_show_analyzer.analysis.structural_segmenter import Part, PartType
+        with get_session() as session:
+            rows = (
+                session.query(PartORM)
+                .filter_by(episode_id=episode_id)
+                .order_by(PartORM.idx)
+                .all()
+            )
+            parts: list[Part] = []
+            for row in rows:
+                segs = [
+                    s for s in transcript.segments
+                    if s.start >= row.start_seconds and s.end <= row.end_seconds
+                ]
+                parts.append(
+                    Part(
+                        type=PartType(row.type),
+                        start=row.start_seconds,
+                        end=row.end_seconds,
+                        segments=segs,
+                        host_labels=set(row.host_labels or []),
+                        guest_labels=set(row.guest_labels or []),
+                        unknown_labels=set(row.unknown_labels or []),
+                    )
+                )
+        logger.info(f"_load_parts: loaded {len(parts)} part(s) for episode {episode_id}")
+        return parts
+
+    def _load_resolved_speakers(self, episode_id: int) -> dict[str, ResolvedSpeaker]:
+        """Reconstruct the speaker-label → ResolvedSpeaker map from the DB.
+
+        Used when a previous identify_speakers checkpoint was skipped and the
+        in-memory return value is therefore None.
+        """
+        with get_session() as session:
+            rows = (
+                session.query(SpeakerIdentity)
+                .filter_by(episode_id=episode_id)
+                .all()
+            )
+            out: dict[str, ResolvedSpeaker] = {}
+            for r in rows:
+                person = r.person
+                out[r.speaker_label] = ResolvedSpeaker(
+                    speaker_label=r.speaker_label,
+                    name_he=person.name_he if person else "Unknown",
+                    name_en=person.name_en if person else "Unknown",
+                    role=r.role,
+                    confidence=r.confidence,
+                    person_id=person.id if person else None,
+                )
+            logger.info(f"Reloaded {len(out)} resolved speakers from DB for ep {episode_id}")
+            return out
 
     def _step_store(
         self,

@@ -3,9 +3,9 @@
 from sqlalchemy.orm import Session
 from loguru import logger
 
-from talk_show_analyzer.analysis.segmenter import Segment
-from talk_show_analyzer.analysis.topics import TopicAnalysis
-from talk_show_analyzer.analysis.sentiment import SentimentAnalysis
+from talk_show_analyzer.analysis.legacy.segmenter import Segment
+from talk_show_analyzer.analysis.legacy.topics import TopicAnalysis
+from talk_show_analyzer.analysis.legacy.sentiment import SentimentAnalysis
 from talk_show_analyzer.analysis.thematic_analyzer import (
     TopicAnalysis as ThematicTopicAnalysis,
 )
