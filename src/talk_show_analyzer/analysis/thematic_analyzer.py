@@ -356,6 +356,14 @@ class ThematicAnalyzer:
 
     # ------------------------------------------------- Stage 2: global merge
 
+    def global_merge(self, chunks: list[dict]) -> list[dict]:
+        """Public alias for cross-chunk topic merging (Stage 2)."""
+        return self._global_merge(chunks)
+
+    def analyze_topic(self, merged: dict, all_chunks: list[dict]) -> "TopicAnalysis | None":
+        """Public alias for per-topic deep analysis (Stage 3)."""
+        return self._analyze_topic(merged, all_chunks)
+
     def _global_merge(self, chunks: list[dict]) -> list[dict]:
         """Cluster chunks by semantic similarity, then verify with the LLM joiner.
 
@@ -554,7 +562,7 @@ class ThematicAnalyzer:
         try:
             response = self.client.messages.create(
                 model=self.deep_model,
-                max_tokens=4000,
+                max_tokens=8000,
                 temperature=0,
                 system=[
                     {
@@ -565,9 +573,14 @@ class ThematicAnalyzer:
                 ],
                 messages=messages,
             )
-            data = extract_fenced_json(safe_response_text(response))
+            raw = safe_response_text(response)
+            data = extract_fenced_json(raw)
         except (json.JSONDecodeError, anthropic.APIError, ValueError) as e:
-            logger.error(f"Deep analysis call failed for {merged['topic_id']}: {e}")
+            raw_preview = locals().get("raw", "")[:300].replace("\n", " ")
+            logger.error(
+                f"Deep analysis call failed for {merged['topic_id']}: {e} | "
+                f"stop_reason={response.stop_reason!r} | response_preview={raw_preview!r}"
+            )
             return None
 
         # Inject fields the LLM doesn't own

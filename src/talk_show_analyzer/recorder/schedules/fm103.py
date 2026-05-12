@@ -9,6 +9,9 @@ import re
 from datetime import datetime, date, time
 from functools import lru_cache
 from typing import Optional
+from zoneinfo import ZoneInfo
+
+_IDT = ZoneInfo("Asia/Jerusalem")
 
 import requests
 from loguru import logger
@@ -73,8 +76,10 @@ class FM103ScheduleProvider(ScheduleProvider):
         self._timeout = timeout
 
     def fetch_for_datetime(self, when: datetime) -> Optional[ScheduledShow]:
-        target_date = when.date()
-        target_t = when.time()
+        # Schedule times are in Israeli local time; convert if caller passed UTC/aware dt
+        when_local = when.astimezone(_IDT) if when.tzinfo is not None else when
+        target_date = when_local.date()
+        target_t = when_local.time()
         day_id = _israeli_day_id(target_date)
 
         entries = _fetch_and_parse(target_date, day_id, self._timeout)

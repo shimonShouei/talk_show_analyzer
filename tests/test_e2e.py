@@ -11,10 +11,13 @@ Complete flow with diarization:
 
 import sys
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from loguru import logger
+from sqlalchemy.orm import joinedload
 
-from talk_show_analyzer.db import init_db
+from talk_show_analyzer.db import init_db, get_session
+from talk_show_analyzer.models import Episode, Segment
 from talk_show_analyzer.pipeline import PipelineOrchestrator
 
 # Setup logging
@@ -53,19 +56,38 @@ def main():
 
     try:
         orchestrator = PipelineOrchestrator()
-        # Record 5 minutes from the first available station
-        episode = orchestrator.run(
-            station="galatz",
-            duration_seconds=300,  # 5 minutes for testing
-            output_dir=output_dir,
+        # 103FM episode broadcasted today 09:00-11:00 Israel time (UTC+3 → 06:00 UTC)
+        broadcast_time = datetime(2026, 5, 12, 6, 0, 0, tzinfo=timezone.utc)
+        episode = orchestrator.run_from_file(
+            audio_path="tests/data/103fm_test.mp3",
+            station="103fm",
+            duration_seconds=1200,  # 20 minutes for testing
+            recorded_at=broadcast_time,
         )
+
+        # Reload with eager relationships so counts are accurate
+        with get_session() as session:
+            ep = (
+                session.query(Episode)
+                .options(
+                    joinedload(Episode.segments)
+                    .joinedload(Segment.topics),
+                    joinedload(Episode.segments)
+                    .joinedload(Segment.guest_appearances),
+                )
+                .filter_by(id=episode.id)
+                .one()
+            )
+            n_segments = len(ep.segments)
+            n_topics = sum(len(s.topics) for s in ep.segments)
+            n_guests = sum(len(s.guest_appearances) for s in ep.segments)
 
         logger.info(f"\n✅ Pipeline complete!")
         logger.info(f"   Episode ID: {episode.id}")
         logger.info(f"   Status: {episode.status}")
-        logger.info(f"   Segments: {len(episode.segments)}")
-        logger.info(f"   Topics: {sum(len(s.topics) for s in episode.segments)}")
-        logger.info(f"   Guests: {sum(len(s.guest_appearances) for s in episode.segments)}\n")
+        logger.info(f"   Segments: {n_segments}")
+        logger.info(f"   Topics: {n_topics}")
+        logger.info(f"   Guests: {n_guests}\n")
 
     except Exception as e:
         logger.error(f"❌ Pipeline failed: {e}")
@@ -73,32 +95,12 @@ def main():
         traceback.print_exc()
         return 1
 
-    # Launch dashboard
+    logger.info("\n" + "=" * 70)
+    logger.info("✓ E2E TEST PASSED")
     logger.info("=" * 70)
-    logger.info("LAUNCHING DASHBOARD")
-    logger.info("=" * 70 + "\n")
-
-    logger.info("🚀 Starting Streamlit dashboard...\n")
-    logger.info("📊 Dashboard URL: http://localhost:8501\n")
-    logger.info("   - Overview: Daily metrics & summary")
-    logger.info("   - Episodes: Browse & filter episodes")
-    logger.info("   - Guests: Top speakers leaderboard")
-    logger.info("   - Topics: Trending topics & sentiment")
-    logger.info("   - Sentiment: Emotional tone analysis\n")
-    logger.info("Press Ctrl+C to stop\n")
-
-    try:
-        subprocess.run(
-            [
-                "streamlit",
-                "run",
-                "src/talk_show_analyzer/dashboard/app.py",
-                "--logger.level=warning",
-            ],
-            check=False,
-        )
-    except KeyboardInterrupt:
-        logger.info("\n✓ Dashboard closed")
+    logger.info("\nPipeline validated successfully!")
+    logger.info("To launch dashboard locally, run:")
+    logger.info("  python scripts/run_dashboard.py\n")
 
     return 0
 

@@ -106,11 +106,10 @@ IMPORTANT:
 - If no name is found for a speaker, return "Unknown".
 - Do NOT use any prior knowledge of who usually hosts which show."""
 
-IDENTIFICATION_PROMPT = """Below is a sample of the transcript focused on NAMING MOMENTS — segments
-containing greetings, titles, or direct address, plus a few segments of follow-up context after
-each one. Use cross-speaker name mentions to identify each speaker.
+IDENTIFICATION_PROMPT = """Below is the full transcript. Use cross-speaker name mentions,
+greetings, titles, and direct address to identify each speaker.
 {jingle_section}
-TRANSCRIPT SAMPLE (naming moments):
+FULL TRANSCRIPT:
 {transcript_sample}
 
 SPEAKER SUMMARIES (all their utterances):
@@ -263,10 +262,9 @@ def _analyze_opening_jingle(
         )
         if not response.content or not response.content[0].text.strip():
             raise ValueError(f"empty response (stop_reason={response.stop_reason!r})")
+        from talk_show_analyzer.analysis.utils import extract_fenced_json
         raw = response.content[0].text.strip()
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw).strip()
-        parsed = json.loads(raw)
+        parsed = extract_fenced_json(raw)
         names: list[str] = parsed.get("host_names", [])
         evidence: str = parsed.get("evidence", "")
         if names:
@@ -465,16 +463,11 @@ class UnifiedSpeakerIdentifier:
             block = f"=== {label}{origin_note} ===\n" + "\n".join(lines)
             speaker_summaries.append(block)
 
-        # ---- Naming-moment focused transcript sample ----
-        moment_segs = _extract_naming_moments(
-            transcript,
-            label_map,
-            content_speaker_labels,
-            settings.naming_moment_context_segments,
-            settings.naming_moment_max_total,
-        )
+        # ---- Full transcript (all content segments) ----
         transcript_sample = "\n".join(
-            f"[{s.start:.0f}s] {s.speaker}: {s.text}" for s in moment_segs
+            f"[{s.start:.0f}s] {label_map.get(s.speaker, s.speaker)}: {s.text}"
+            for s in transcript.segments
+            if s.speaker in content_speaker_labels
         )
 
         if jingle_names:
@@ -643,4 +636,73 @@ class UnifiedSpeakerIdentifier:
             f"{len(results)} content speakers ({len(merged_to_originals)} canonical)"
         )
         return results
-        
+
+
+def consolidate_speakers(
+    chunk_analyses: list,  # list[ChunkAnalysis] — imported lazily to avoid circular
+    label_map: dict[str, str],  # original_label → canonical_label from acoustic merge
+) -> dict[str, ResolvedSpeaker]:
+    """Aggregate per-chunk speaker role votes into one resolved identity per original label.
+
+    For each canonical speaker (post acoustic-merge), collects all ChunkSpeakerRole
+    votes across all chunks and picks the highest-confidence non-unknown assignment.
+    Returns a dict keyed by ORIGINAL speaker labels so downstream code is unchanged.
+    """
+    # canonical → list of (confidence, role, name_he, name_en)
+    votes: dict[str, list] = defaultdict(list)
+    for ca in chunk_analyses:
+        for sr in ca.speaker_roles:
+            canonical = label_map.get(sr.speaker_label, sr.speaker_label)
+            votes[canonical].append((sr.confidence, sr.role, sr.name_he, sr.name_en))
+
+    # canonical → list of original labels
+    merged_to_originals: dict[str, list[str]] = defaultdict(list)
+    for original, canonical in label_map.items():
+        merged_to_originals[canonical].append(original)
+    # Ensure canonicals that weren't in label_map (no embeddings) map to themselves
+    for ca in chunk_analyses:
+        for sr in ca.speaker_roles:
+            canonical = label_map.get(sr.speaker_label, sr.speaker_label)
+            merged_to_originals[canonical]  # touch to create key
+
+    results: dict[str, ResolvedSpeaker] = {}
+
+    all_canonicals = set(votes.keys()) | set(merged_to_originals.keys())
+    for canonical in all_canonicals:
+        role_votes = votes.get(canonical, [])
+        # Prefer live roles (host/guest/caller) with name, then media_clip, then unknown
+        live_valid = [
+            (conf, role, he, en)
+            for conf, role, he, en in role_votes
+            if conf >= 0.7 and role in ("host", "guest", "caller") and en != "Unknown"
+        ]
+        clip_votes = [
+            (conf, role, he, en)
+            for conf, role, he, en in role_votes
+            if role == "media_clip"
+        ]
+        if live_valid:
+            conf, role, name_he, name_en = max(live_valid, key=lambda x: x[0])
+        elif clip_votes:
+            conf, role, name_he, name_en = max(clip_votes, key=lambda x: x[0])
+            # Use the name if mentioned, otherwise Unknown
+        else:
+            conf, role, name_he, name_en = 0.0, "unknown", "Unknown", "Unknown"
+
+        originals = merged_to_originals.get(canonical, [canonical])
+        for original in originals:
+            results[original] = ResolvedSpeaker(
+                speaker_label=original,
+                name_he=name_he,
+                name_en=name_en,
+                role=role,
+                confidence=conf,
+            )
+        merge_note = f" (merged from {len(originals)})" if len(originals) > 1 else ""
+        logger.info(f"  {canonical}{merge_note} → {name_en} ({role}, conf={conf:.2f})")
+
+    identified = sum(1 for r in results.values() if r.name_en != "Unknown")
+    clips = sum(1 for r in results.values() if r.role == "media_clip")
+    logger.info(f"Speaker consolidation: {identified}/{len(results)} identified, {clips} media_clip")
+    return results
+

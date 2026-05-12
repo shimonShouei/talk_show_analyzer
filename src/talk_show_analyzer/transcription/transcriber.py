@@ -94,9 +94,17 @@ class Transcriber:
         self.vad_min_silence_ms = vad_min_silence_ms
 
         logger.info(f"Loading Whisper model: {model_size}")
-        self.whisper_model = WhisperModel(
-            model_size, device=device, compute_type=compute_type
-        )
+        try:
+            self.whisper_model = WhisperModel(
+                model_size, device=device, compute_type=compute_type
+            )
+        except ValueError:
+            # Pascal GPUs (sm_61) and older don't support efficient float16 — fall back to int8
+            fallback = "int8"
+            logger.warning(f"compute_type={compute_type} unsupported on this GPU, retrying with {fallback}")
+            self.whisper_model = WhisperModel(
+                model_size, device=device, compute_type=fallback
+            )
 
         self.enable_diarization = enable_diarization
         self.diarization_pipeline = None

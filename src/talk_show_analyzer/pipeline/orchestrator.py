@@ -1,6 +1,7 @@
 """Pipeline orchestration with checkpointing and recovery."""
 
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -10,15 +11,21 @@ from sqlalchemy.orm import Session
 
 from talk_show_analyzer.config import settings
 from talk_show_analyzer.db import get_session
-from talk_show_analyzer.models import Episode, PartORM, PipelineRun, SpeakerIdentity, Station
+from talk_show_analyzer.models import Episode, PartORM, PipelineRun, SpeakerIdentity, Station, Segment, Person
 from talk_show_analyzer.recorder import record_station
 from talk_show_analyzer.transcription import Transcriber
 from talk_show_analyzer.analysis import ThematicAnalyzer
-from talk_show_analyzer.analysis.structural_segmenter import Part, segment_into_parts
+from talk_show_analyzer.analysis.chunk_analyzer import ChunkAnalyzer, chunk_analyses_to_thematic_chunks
+from talk_show_analyzer.analysis.structural_segmenter import Part, assemble_parts_from_chunks, segment_into_parts
 from talk_show_analyzer.analysis.thematic_analyzer import TopicAnalysis
 from talk_show_analyzer.identification import UnifiedSpeakerIdentifier
 from talk_show_analyzer.identification.host_resolver import HostResolution, HostResolver
-from talk_show_analyzer.identification.llm_identifier import ResolvedSpeaker
+from talk_show_analyzer.identification.llm_identifier import (
+    ResolvedSpeaker,
+    consolidate_speakers,
+    _merge_speakers_acoustic,
+)
+from talk_show_analyzer.identification.reference_registry import load_registry, match_to_references
 from talk_show_analyzer.transcription.transcriber import (
     TranscriptionResult,
     SpeakerSegment,
@@ -29,26 +36,46 @@ from talk_show_analyzer.pipeline.store import store_thematic_results
 import talk_show_analyzer.recorder.schedules  # noqa: F401
 
 
+def _setup_logging() -> None:
+    """Configure loguru: file sink at DEBUG + stderr at settings.log_level."""
+    try:
+        logger.remove(0)  # drop default handler
+    except ValueError:
+        pass  # already removed
+    logger.add(sys.stderr, level=settings.log_level, colorize=True,
+                format="<level>{level: <8}</level> | {message}")
+    logs_dir = Path("logs")
+    logs_dir.mkdir(exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    logger.add(
+        logs_dir / f"pipeline_{ts}.log",
+        level="DEBUG",
+        rotation="100 MB",
+        retention=10,
+        encoding="utf-8",
+    )
+    logger.debug(f"Logging to {logs_dir}/pipeline_{ts}.log")
+
+
 class PipelineOrchestrator:
     """Orchestrate recording, transcription, analysis, and storage."""
 
     STEPS = [
         "record",
         "transcribe",
-        "identify_speakers",
+        "chunk_analyze",
         "resolve_hosts",
-        "structural_segment",
-        "thematic",
         "store",
     ]
 
     def __init__(self):
         """Initialize orchestrator."""
+        _setup_logging()
         self.transcriber = Transcriber(
             device=settings.whisper_device,
             compute_type=settings.whisper_compute_type,
         )
-        self.speaker_identifier = UnifiedSpeakerIdentifier()
+        self.chunk_analyzer = ChunkAnalyzer()
         self.host_resolver = HostResolver()
         self.thematic_analyzer = ThematicAnalyzer()
 
@@ -115,39 +142,24 @@ class PipelineOrchestrator:
                 lambda: self._step_transcribe(audio_path),
             )
 
-            # Step 3: Identify speakers across the whole transcript
-            speaker_identities = self._run_step_with_checkpoint(
+            # Step 3: Unified chunk analysis (speaker ID + structural parts + topics)
+            chunk_result = self._run_step_with_checkpoint(
                 episode_id,
-                "identify_speakers",
-                lambda: self._step_identify_speakers(
-                    transcript, transcript.segments, episode_id
-                ),
+                "chunk_analyze",
+                lambda: self._step_chunk_analyze(transcript, episode_id),
             )
-            if speaker_identities is None:
-                speaker_identities = self._load_resolved_speakers(episode_id)
+            if chunk_result is None:
+                chunk_result = self._load_chunk_analyze_results(episode_id, transcript)
+            speaker_identities, parts, topic_analyses = chunk_result
 
             # Step 4: Resolve hosts against the station schedule
-            host_resolution = self._run_step_with_checkpoint(
+            self._run_step_with_checkpoint(
                 episode_id,
                 "resolve_hosts",
                 lambda: self._step_resolve_hosts(station, recorded_at, speaker_identities),
             )
 
-            # Step 5: Structural segmentation into parts (interview vs host_talk)
-            parts = self._run_step_with_checkpoint(
-                episode_id,
-                "structural_segment",
-                lambda: self._step_structural_segment(transcript, speaker_identities, episode_id),
-            )
-
-            # Step 6: Thematic Intelligence pipeline (segment + merge + analyze)
-            topic_analyses = self._run_step_with_checkpoint(
-                episode_id,
-                "thematic",
-                lambda: self._step_thematic(transcript, parts),
-            )
-
-            # Step 7: Store
+            # Step 5: Store
             self._run_step_with_checkpoint(
                 episode_id,
                 "store",
@@ -158,11 +170,24 @@ class PipelineOrchestrator:
             logger.info("✓ PIPELINE COMPLETE")
             logger.info(f"{'='*60}\n")
 
-            # Fetch and return updated episode
+            # Fetch and return updated episode (with eager-loaded relationships)
             with get_session() as session:
+                from sqlalchemy.orm import joinedload
                 episode = (
-                    session.query(Episode).filter_by(id=episode_id).first()
+                    session.query(Episode)
+                    .filter_by(id=episode_id)
+                    .options(
+                        joinedload(Episode.segments).joinedload(Segment.topics),
+                        joinedload(Episode.segments).joinedload(Segment.guest_appearances),
+                    )
+                    .first()
                 )
+                # Force all lazy attributes to load while session is active
+                if episode:
+                    _ = episode.segments
+                    for segment in episode.segments:
+                        _ = segment.topics
+                        _ = segment.guest_appearances
                 return episode
 
         except Exception as e:
@@ -174,6 +199,7 @@ class PipelineOrchestrator:
         audio_path: str | Path,
         station: str = "unknown",
         duration_seconds: int | None = None,
+        recorded_at: datetime | None = None,
     ) -> Episode:
         """
         Run the pipeline on an existing audio file, skipping the record step.
@@ -208,7 +234,8 @@ class PipelineOrchestrator:
         logger.info(f"PIPELINE START (from file): {audio_path.name}")
         logger.info(f"{'='*60}\n")
 
-        recorded_at = datetime.utcnow()
+        if recorded_at is None:
+            recorded_at = datetime.utcnow()
         with get_session() as session:
             db_station = self._get_or_create_station(session, station)
             episode = Episode(
@@ -230,25 +257,18 @@ class PipelineOrchestrator:
             transcript = self._run_step_with_checkpoint(
                 episode_id, "transcribe", lambda: self._step_transcribe(audio_path)
             )
-            speaker_identities = self._run_step_with_checkpoint(
+            chunk_result = self._run_step_with_checkpoint(
                 episode_id,
-                "identify_speakers",
-                lambda: self._step_identify_speakers(transcript, transcript.segments, episode_id),
+                "chunk_analyze",
+                lambda: self._step_chunk_analyze(transcript, episode_id),
             )
-            if speaker_identities is None:
-                speaker_identities = self._load_resolved_speakers(episode_id)
-            host_resolution = self._run_step_with_checkpoint(
+            if chunk_result is None:
+                chunk_result = self._load_chunk_analyze_results(episode_id, transcript)
+            speaker_identities, parts, topic_analyses = chunk_result
+            self._run_step_with_checkpoint(
                 episode_id,
                 "resolve_hosts",
                 lambda: self._step_resolve_hosts(station, recorded_at, speaker_identities),
-            )
-            parts = self._run_step_with_checkpoint(
-                episode_id,
-                "structural_segment",
-                lambda: self._step_structural_segment(transcript, speaker_identities, episode_id),
-            )
-            topic_analyses = self._run_step_with_checkpoint(
-                episode_id, "thematic", lambda: self._step_thematic(transcript, parts)
             )
             self._run_step_with_checkpoint(
                 episode_id,
@@ -261,7 +281,23 @@ class PipelineOrchestrator:
             logger.info(f"{'='*60}\n")
 
             with get_session() as session:
-                return session.query(Episode).filter_by(id=episode_id).first()
+                from sqlalchemy.orm import joinedload
+                episode = (
+                    session.query(Episode)
+                    .filter_by(id=episode_id)
+                    .options(
+                        joinedload(Episode.segments).joinedload(Segment.topics),
+                        joinedload(Episode.segments).joinedload(Segment.guest_appearances),
+                    )
+                    .first()
+                )
+                # Force all lazy attributes to load while session is active
+                if episode:
+                    _ = episode.segments
+                    for segment in episode.segments:
+                        _ = segment.topics
+                        _ = segment.guest_appearances
+                return episode
 
         except Exception as e:
             logger.error(f"\n✗ PIPELINE FAILED: {e}")
@@ -318,24 +354,20 @@ class PipelineOrchestrator:
 
         # Continue from where we left off
         try:
-            # Always (re)load speakers — needed by resolve_hosts and structural_segment.
-            speaker_identities = self._run_step_with_checkpoint(
+            chunk_result = self._run_step_with_checkpoint(
                 episode_id,
-                "identify_speakers",
-                lambda: self._step_identify_speakers(
-                    transcript, transcript.segments, episode_id
-                ),
+                "chunk_analyze",
+                lambda: self._step_chunk_analyze(transcript, episode_id),
             )
-            if speaker_identities is None:
-                speaker_identities = self._load_resolved_speakers(episode_id)
+            if chunk_result is None:
+                chunk_result = self._load_chunk_analyze_results(episode_id, transcript)
+            speaker_identities, parts, topic_analyses = chunk_result
 
             # Need station + recorded_at for host resolution; pull from DB.
             with get_session() as session:
                 ep = session.query(Episode).filter_by(id=episode_id).first()
                 ep_recorded_at = ep.recorded_at
-                ep_station = (
-                    session.query(Station).filter_by(id=ep.station_id).first()
-                )
+                ep_station = session.query(Station).filter_by(id=ep.station_id).first()
                 ep_station_name = ep_station.name if ep_station else "unknown"
 
             self._run_step_with_checkpoint(
@@ -348,20 +380,6 @@ class PipelineOrchestrator:
 
             self._run_step_with_checkpoint(
                 episode_id,
-                "structural_segment",
-                lambda: self._step_structural_segment(transcript, speaker_identities, episode_id),
-            )
-
-            parts = self._load_parts(episode_id, transcript)
-
-            topic_analyses = self._run_step_with_checkpoint(
-                episode_id,
-                "thematic",
-                lambda: self._step_thematic(transcript, parts),
-            )
-
-            self._run_step_with_checkpoint(
-                episode_id,
                 "store",
                 lambda: self._step_store(episode_id, transcript, topic_analyses),
             )
@@ -369,9 +387,22 @@ class PipelineOrchestrator:
             logger.info("✓ Resume completed")
 
             with get_session() as session:
+                from sqlalchemy.orm import joinedload
                 episode = (
-                    session.query(Episode).filter_by(id=episode_id).first()
+                    session.query(Episode)
+                    .filter_by(id=episode_id)
+                    .options(
+                        joinedload(Episode.segments).joinedload(Segment.topics),
+                        joinedload(Episode.segments).joinedload(Segment.guest_appearances),
+                    )
+                    .first()
                 )
+                # Force all lazy attributes to load while session is active
+                if episode:
+                    _ = episode.segments
+                    for segment in episode.segments:
+                        _ = segment.topics
+                        _ = segment.guest_appearances
                 return episode
 
         except Exception as e:
@@ -468,6 +499,132 @@ class PipelineOrchestrator:
             return run.step if run else None
 
     # Pipeline step implementations
+
+    def _step_chunk_analyze(
+        self,
+        transcript: TranscriptionResult,
+        episode_id: int,
+    ) -> tuple[dict[str, ResolvedSpeaker], list[Part], list[TopicAnalysis]]:
+        """Unified chunk analysis: speaker ID + structural parts + thematic topics.
+
+        Replaces the old identify_speakers + structural_segment + thematic steps with:
+          1. Acoustic merge (no API)
+          2. Per-chunk API call (speaker roles + topics + part_type) — parallel
+          3. Speaker consolidation across chunks (no API)
+          4. Part assembly from chunk part_types (no API)
+          5. Topic Stage 2 — embedding cluster + LLM verification (1 API call)
+          6. Topic Stage 3 — deep analysis per merged topic (1 API call each)
+        """
+        logger.info("Running unified chunk analysis...")
+
+        # --- Acoustic merge ---
+        content_labels: set[str] = {s.speaker for s in transcript.segments}
+        content_embeddings = {
+            lab: emb
+            for lab, emb in transcript.speaker_embeddings.items()
+            if lab in content_labels
+        }
+        if settings.acoustic_merge_enabled and len(content_embeddings) >= 2:
+            label_map = _merge_speakers_acoustic(
+                content_embeddings, settings.acoustic_merge_threshold
+            )
+        else:
+            label_map = {}
+        for label in content_labels:
+            label_map.setdefault(label, label)
+
+        # --- Reference registry matching (known hosts/guests by voice) ---
+        references = load_registry(settings.reference_registry_path)
+        reference_matches: dict[str, any] = {}
+        if references and content_embeddings:
+            logger.info("Matching episode speakers against reference registry...")
+            reference_matches = match_to_references(
+                content_embeddings, references, threshold=settings.reference_match_threshold
+            )
+            logger.info(f"Reference matching: {len(reference_matches)}/{len(content_embeddings)} speakers matched")
+
+        # --- Per-chunk parallel API calls ---
+        chunk_analyses = self.chunk_analyzer.analyze_all(transcript)
+
+        # --- Speaker consolidation ---
+        logger.info("Consolidating speaker roles across chunks...")
+        resolved_speakers = consolidate_speakers(chunk_analyses, label_map)
+
+        # --- Override with reference matches (high-confidence voice-based ID) ---
+        for original_label, ref in reference_matches.items():
+            canonical = label_map.get(original_label, original_label)
+            # Apply to all original labels that map to the same canonical
+            for orig, can in label_map.items():
+                if can == canonical:
+                    resolved_speakers[orig] = ResolvedSpeaker(
+                        speaker_label=orig,
+                        name_he=ref.name_he,
+                        name_en=ref.name_en,
+                        role=ref.role,
+                        confidence=0.95,
+                    )
+            logger.info(f"  {canonical} → {ref.name_en} (voice match, conf=0.95)")
+
+        # Persist speaker identities to DB
+        with get_session() as session:
+            for original_label, rs in resolved_speakers.items():
+                person_id = None
+                if rs.name_en != "Unknown":
+                    person = session.query(Person).filter_by(name_en=rs.name_en).first()
+                    if not person:
+                        person = Person(
+                            name_he=rs.name_he, name_en=rs.name_en, role=rs.role
+                        )
+                        session.add(person)
+                        session.flush()
+                    person_id = person.id
+                    rs.person_id = person_id
+                identity = SpeakerIdentity(
+                    episode_id=episode_id,
+                    speaker_label=original_label,
+                    person_id=person_id,
+                    role=rs.role,
+                    confidence=rs.confidence,
+                    method="chunk_consolidation",
+                    evidence={"canonical_label": label_map.get(original_label, original_label)},
+                )
+                session.add(identity)
+            session.commit()
+
+        # --- Part assembly ---
+        parts = assemble_parts_from_chunks(chunk_analyses)
+        self._persist_parts(episode_id, parts)
+
+        # --- Thematic Stage 2 + 3 ---
+        thematic_chunks = chunk_analyses_to_thematic_chunks(chunk_analyses, transcript)
+        logger.info(f"Thematic: {len(thematic_chunks)} topic chunks from {len(chunk_analyses)} windows")
+
+        topic_analyses: list[TopicAnalysis] = []
+        if thematic_chunks:
+            merged = self.thematic_analyzer.global_merge(thematic_chunks)
+            logger.info(f"Stage 2: merged to {len(merged)} cross-show topics")
+            for i, m in enumerate(merged):
+                logger.info(f"Stage 3: deep analysis {i+1}/{len(merged)} — {m['merged_title_he']}")
+                ta = self.thematic_analyzer.analyze_topic(m, thematic_chunks)
+                if ta is not None:
+                    topic_analyses.append(ta)
+            logger.info(f"Thematic: completed {len(topic_analyses)} topic analyses")
+
+        identified = sum(1 for r in resolved_speakers.values() if r.name_en != "Unknown")
+        logger.info(
+            f"chunk_analyze complete: {identified}/{len(resolved_speakers)} speakers identified, "
+            f"{len(parts)} parts, {len(topic_analyses)} topic analyses"
+        )
+        return resolved_speakers, parts, topic_analyses
+
+    def _load_chunk_analyze_results(
+        self, episode_id: int, transcript: TranscriptionResult
+    ) -> tuple[dict[str, ResolvedSpeaker], list[Part], list[TopicAnalysis]]:
+        """Reload chunk_analyze outputs from DB when the checkpoint was already done."""
+        resolved_speakers = self._load_resolved_speakers(episode_id)
+        parts = self._load_parts(episode_id, transcript)
+        return resolved_speakers, parts, []  # topic_analyses must come from store step
+
     def _step_record(self, station: str, output_path: Path, duration: int) -> Path:
         """Record audio from stream."""
         logger.info(f"Recording {duration}s from {station}...")

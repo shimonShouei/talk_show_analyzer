@@ -169,6 +169,86 @@ def _merge_short_parts(parts: list[Part], min_duration: float) -> list[Part]:
     return out
 
 
+def _merge_short_parts_by_type(parts: list[Part], min_duration: float) -> list[Part]:
+    """Like _merge_short_parts but preserves the absorbing part's type.
+
+    Used when parts come from chunk_analyze (no host/guest label sets populated),
+    so we cannot recompute type from labels — instead keep the longer neighbour's type.
+    """
+    if not parts:
+        return parts
+    out: list[Part] = []
+    for p in parts:
+        if out and out[-1].duration < min_duration:
+            prev = out.pop()
+            # Keep the current part's type (it absorbs the short prev)
+            merged = Part(
+                type=p.type,
+                start=prev.start,
+                end=p.end,
+                segments=prev.segments + p.segments,
+                host_labels=prev.host_labels | p.host_labels,
+                guest_labels=prev.guest_labels | p.guest_labels,
+                unknown_labels=prev.unknown_labels | p.unknown_labels,
+            )
+            out.append(merged)
+        else:
+            out.append(p)
+    if len(out) >= 2 and out[-1].duration < min_duration:
+        tail = out.pop()
+        prev = out[-1]
+        prev.end = tail.end
+        prev.segments.extend(tail.segments)
+        prev.host_labels |= tail.host_labels
+        prev.guest_labels |= tail.guest_labels
+        prev.unknown_labels |= tail.unknown_labels
+        # keep prev.type — it's the dominant part
+    return out
+
+
+def assemble_parts_from_chunks(
+    chunk_analyses: list,  # list[ChunkAnalysis] — imported lazily to avoid circular
+    *,
+    min_part_duration_s: float = DEFAULT_MIN_PART_DURATION_S,
+) -> list[Part]:
+    """Assemble structural parts from per-chunk part_type classifications.
+
+    Merges adjacent chunks with the same part_type, then applies _merge_short_parts()
+    to clean up short fragments. No LLM call — pure post-processing.
+    """
+    if not chunk_analyses:
+        return []
+
+    parts: list[Part] = []
+    cur: Optional[Part] = None
+
+    for ca in sorted(chunk_analyses, key=lambda c: c.start):
+        try:
+            pt = PartType(ca.part_type)
+        except ValueError:
+            pt = PartType.UNKNOWN
+
+        if cur is None or pt != cur.type:
+            if cur is not None:
+                parts.append(cur)
+            cur = Part(type=pt, start=ca.start, end=ca.end)
+        else:
+            cur.end = ca.end
+
+    if cur is not None:
+        parts.append(cur)
+
+    parts = _merge_short_parts_by_type(parts, min_part_duration_s)
+
+    logger.info(
+        f"assemble_parts_from_chunks: {len(parts)} part(s) — "
+        f"{sum(1 for p in parts if p.type == PartType.INTERVIEW)} interview, "
+        f"{sum(1 for p in parts if p.type == PartType.HOST_TALK)} host_talk, "
+        f"{sum(1 for p in parts if p.type == PartType.UNKNOWN)} unknown"
+    )
+    return parts
+
+
 def segment_into_parts(
     segments: Iterable[SpeakerSegment],
     resolved_speakers: dict[str, ResolvedSpeaker],

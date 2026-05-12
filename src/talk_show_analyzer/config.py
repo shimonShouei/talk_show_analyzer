@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
+    # Reference speaker registry (pre-computed voice embeddings for known hosts/guests)
+    reference_registry_path: str = "data/voice_samples/registry.json"
+    reference_match_threshold: float = 0.75  # cosine similarity threshold
+
     @field_validator("pyannote_num_speakers", mode="before")
     @classmethod
     def validate_num_speakers(cls, v):
