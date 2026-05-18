@@ -170,19 +170,39 @@ def _merge_short_parts(parts: list[Part], min_duration: float) -> list[Part]:
     return out
 
 
+# These types act as hard structural boundaries in the broadcast.  Even a 3-second
+# jingle marks the real end of one segment and the start of the next, so we never
+# absorb them into a neighbour and never merge content across them.
+_HARD_BOUNDARY_TYPES = {PartType.JINGLE, PartType.COMMERCIAL, PartType.NEWS}
+
+
 def _merge_short_parts_by_type(parts: list[Part], min_duration: float) -> list[Part]:
     """Like _merge_short_parts but preserves the absorbing part's type.
 
     Used when parts come from chunk_analyze (no host/guest label sets populated),
     so we cannot recompute type from labels — instead keep the longer neighbour's type.
+
+    JINGLE / COMMERCIAL / NEWS parts are never absorbed regardless of duration:
+    they mark real structural transitions (a sting ends one segment and opens
+    the next), so removing them would merge unrelated content across the boundary.
     """
     if not parts:
         return parts
     out: list[Part] = []
     for p in parts:
-        if out and out[-1].duration < min_duration:
+        # Hard-boundary types are always kept as-is.
+        if p.type in _HARD_BOUNDARY_TYPES:
+            out.append(p)
+            continue
+        # Only absorb a short predecessor when neither it nor the part before it
+        # is a hard boundary (otherwise the boundary would be silently erased).
+        if (
+            out
+            and out[-1].duration < min_duration
+            and out[-1].type not in _HARD_BOUNDARY_TYPES
+            and (len(out) < 2 or out[-2].type not in _HARD_BOUNDARY_TYPES)
+        ):
             prev = out.pop()
-            # Keep the current part's type (it absorbs the short prev)
             merged = Part(
                 type=p.type,
                 start=prev.start,
@@ -195,7 +215,13 @@ def _merge_short_parts_by_type(parts: list[Part], min_duration: float) -> list[P
             out.append(merged)
         else:
             out.append(p)
-    if len(out) >= 2 and out[-1].duration < min_duration:
+    # Tail: short content part folds into its predecessor only when no boundary separates them.
+    if (
+        len(out) >= 2
+        and out[-1].duration < min_duration
+        and out[-1].type not in _HARD_BOUNDARY_TYPES
+        and out[-2].type not in _HARD_BOUNDARY_TYPES
+    ):
         tail = out.pop()
         prev = out[-1]
         prev.end = tail.end
@@ -203,7 +229,6 @@ def _merge_short_parts_by_type(parts: list[Part], min_duration: float) -> list[P
         prev.host_labels |= tail.host_labels
         prev.guest_labels |= tail.guest_labels
         prev.unknown_labels |= tail.unknown_labels
-        # keep prev.type — it's the dominant part
     return out
 
 

@@ -448,6 +448,9 @@ class PartORM(Base):
     host_labels: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     guest_labels: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     unknown_labels: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # Populated by the enrich_parts pipeline step.
+    speaker_analyses: Mapped[list] = mapped_column(JSON, nullable=True, default=None)
+    qa_pairs: Mapped[list] = mapped_column(JSON, nullable=True, default=None)
 
     episode: Mapped["Episode"] = relationship("Episode")
 

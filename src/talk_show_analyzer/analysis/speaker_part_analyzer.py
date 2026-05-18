@@ -35,13 +35,14 @@ from talk_show_analyzer.config import settings
 class SpeakerPartAnalysis(BaseModel):
     """One speaker's behavior within one structural part."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     speaker_label: str
     hate_score: float = Field(ge=0.0, le=1.0)
     hate_level_max: HateSpeechLevel = "none"
     incidents: list[HateSpeechIncident] = Field(default_factory=list)
     stance_summary_he: str = ""
+    tone: str = "calm"  # aggressive|defensive|calm|sarcastic|emotional|factual|evasive|enthusiastic|dismissive|uncertain
     topics_he: list[str] = Field(default_factory=list)
 
 
@@ -71,8 +72,20 @@ For each speaker label, return an object with the following fields:
                         rationale_en   (one English sentence explaining why
                                         this rises to the chosen level)
                       Empty list if no incidents.
-  • stance_summary_he — 1-2 Hebrew sentences summarizing the speaker's stance
-                        and tone in this part.
+  • stance_summary_he — 1-3 Hebrew sentences capturing the speaker's stance AND
+                        tone. Anchor it in concrete signals from the text:
+                        - rhetorical questions (שאלות רטוריות) → frustration / challenge
+                        - sarcasm markers ("כן, בטח", "נפלא", ironic praise) → contempt / mockery
+                        - loaded / emotive terms with political or cultural charge
+                        - hedging language ("אולי", "יכול להיות") → uncertainty or diplomacy
+                        - assertive declaratives without qualification → confidence / certainty
+                        - self-interruption or rapid topic shift → agitation or evasion
+                        - exclamatory phrasing or repeated emphasis → urgency / strong feeling
+                        Quote or paraphrase one specific phrase as evidence.
+  • tone              — single English word best describing the speaker's dominant
+                        tone in this part. Choose from:
+                        aggressive | defensive | calm | sarcastic | emotional |
+                        factual | evasive | enthusiastic | dismissive | uncertain
   • topics_he         — short Hebrew labels (3-8 words each) for the topics
                         this speaker engaged with in this part.
 
@@ -86,12 +99,13 @@ Example:
     "hate_level_max": "none",
     "incidents": [],
     "stance_summary_he": "...",
+    "tone": "calm",
     "topics_he": ["..."]
   }
 ]
 ```
 If a speaker appears only in non-substantive ways (mh-hmm, back-channel),
-include them with hate_score=0.0 and empty incidents."""
+include them with hate_score=0.0, tone="calm", and empty incidents."""
 
 
 def _format_part_for_prompt(part: Part) -> str:

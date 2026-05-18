@@ -21,7 +21,23 @@
       "Bash(curl -sL --max-time 15 -H \"User-Agent: Mozilla/5.0\" \"https://radio.coolsite.co.il/stations.js\")",
       "Bash(conda run *)",
       "Bash(sacct -j 17461781 --format=JobID,State,ExitCode,Start,End)",
-      "Bash(grep -E '^\\(tests|scripts|slurm|src\\)$')"
+      "Bash(grep -E '^\\(tests|scripts|slurm|src\\)$')",
+      "WebFetch(domain:glz.co.il)",
+      "Bash(/home/shouei/.conda/envs/talk_show/bin/python -m pytest tests/test_structural_segmenter.py -x --tb=short)",
+      "Bash(curl -s -A \"Mozilla/5.0\" \"https://103embed.maariv.co.il/?ZrqvnVq=KFMEEK&c41t4nzVQ=FJF\")",
+      "Bash(curl -s \"https://cdn-lz-streams-kre.maariv.co.il/media/mag1205265.mp3\" -I)",
+      "Bash(curl -s \"https://download.103fm.maariv.co.il/mag1205265.mp3\" -I)",
+      "Bash(curl -s \"https://cdn.103fm.maariv.co.il/mag1205265.mp3\" -I)",
+      "Bash(curl -s \"https://cdn-lz-streams-kre.maariv.co.il/media/mag1205265.mp3\" -sI)",
+      "Bash(curl -s \"https://download.103fm.maariv.co.il/mag1205265.mp3\" -sI)",
+      "Bash(curl -s \"https://maariv-cdn.co.il/mag1205265.mp3\" -sI)",
+      "Bash(curl -s \"https://103embed.maariv.co.il/js/player.js\" -sI)",
+      "Bash(wait)",
+      "Bash(curl -s \"https://103embed.maariv.co.il/\")",
+      "Bash(curl -s -A \"Mozilla/5.0\" \"https://103embed.maariv.co.il/playerLive/IMA/aod_sttings_embed.js\")",
+      "Bash(mkdir -p /home/shouei/talk_show_analyzer/tests/data)",
+      "Bash(curl -L -A \"Mozilla/5.0\" \"https://awaod01.streamgates.net/103fm_aw/mag1205265.mp3\" -o /home/shouei/talk_show_analyzer/tests/data/103fm_test.mp3 --progress-bar)",
+      "Bash(curl -s -I --max-time 5 \"https://cdn.cybercdn.live/103FM/Live/icecast.audio\")"
     ]
   }
 }

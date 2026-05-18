@@ -146,15 +146,17 @@ class ChunkAnalyzer:
         if not windows:
             return []
 
+        total = len(windows)
+        episode_duration = transcript.duration or (windows[-1][-1].end if windows else 0)
         logger.info(
-            f"ChunkAnalyzer: {len(windows)} windows, "
+            f"ChunkAnalyzer: {total} windows, "
             f"max {self.MAX_WORKERS} parallel API calls"
         )
 
         results: list[ChunkAnalysis] = []
         with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as pool:
             futures = {
-                pool.submit(self._analyze_window, i, window): i
+                pool.submit(self._analyze_window, i, window, total, episode_duration): i
                 for i, window in enumerate(windows)
             }
             for future in as_completed(futures):
@@ -172,10 +174,16 @@ class ChunkAnalyzer:
                     logger.error(f"  chunk {idx} failed: {e}")
 
         results.sort(key=lambda c: c.start)
-        logger.info(f"ChunkAnalyzer: {len(results)}/{len(windows)} chunks completed")
+        logger.info(f"ChunkAnalyzer: {len(results)}/{total} chunks completed")
         return results
 
-    def _analyze_window(self, idx: int, window: list[SpeakerSegment]) -> ChunkAnalysis:
+    def _analyze_window(
+        self,
+        idx: int,
+        window: list[SpeakerSegment],
+        total_windows: int = 1,
+        episode_duration: float = 0.0,
+    ) -> ChunkAnalysis:
         start = window[0].start
         end = window[-1].end
         chunk_id = f"c{idx}"
@@ -187,6 +195,20 @@ class ChunkAnalyzer:
             step = max(1, len(window) // n_keep)
             window = window[::step]
             text = _format_window(window)
+
+        # Build a time-position hint so the model knows where in the episode this falls.
+        # Opening minutes are likely jingle/intro; closing minutes often wrap-up/sign-off.
+        position_pct = (start / episode_duration * 100) if episode_duration > 0 else 0
+        if position_pct < 5:
+            position_hint = "opening segment (likely intro jingle or host welcome)"
+        elif episode_duration > 0 and (episode_duration - end) < episode_duration * 0.05:
+            position_hint = "closing segment (likely sign-off or outro)"
+        else:
+            position_hint = f"{position_pct:.0f}% through the episode"
+
+        context_header = (
+            f"[Window {idx + 1}/{total_windows} | {start:.0f}s–{end:.0f}s | {position_hint}]\n\n"
+        )
 
         try:
             response = self.client.messages.create(
@@ -203,7 +225,7 @@ class ChunkAnalyzer:
                 messages=[
                     {
                         "role": "user",
-                        "content": f"Analyze this segment:\n\n{text}",
+                        "content": f"{context_header}Analyze this segment:\n\n{text}",
                     }
                 ],
             )

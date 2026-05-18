@@ -58,13 +58,25 @@ echo ""
 
 mkdir -p slurm_logs "$OUTPUT_DIR"
 
-python << EOF
-import sys
+export TSA_STATION="$STATION"
+export TSA_STATION_NAME="$STATION_NAME"
+export TSA_DURATION="$DURATION"
+export TSA_DURATION_MIN="$DURATION_MIN"
+export TSA_OUTPUT_DIR="$OUTPUT_DIR"
+
+python << 'EOF'
+import os, sys
 from pathlib import Path
 from loguru import logger
 
 from talk_show_analyzer.db import init_db
 from talk_show_analyzer.pipeline import PipelineOrchestrator
+
+station      = os.environ["TSA_STATION"]
+station_name = os.environ["TSA_STATION_NAME"]
+duration     = int(os.environ["TSA_DURATION"])
+duration_min = int(os.environ["TSA_DURATION_MIN"])
+output_dir   = Path(os.environ["TSA_OUTPUT_DIR"])
 
 logger.remove()
 logger.add(
@@ -74,9 +86,9 @@ logger.add(
 )
 
 logger.info("\n" + "=" * 70)
-logger.info(f"PIPELINE: {STATION_NAME}")
-logger.info(f"Duration: {DURATION_MIN} min | Station: {STATION}")
-logger.info("Steps: record → transcribe → identify_speakers → topics → store")
+logger.info(f"PIPELINE: {station_name}")
+logger.info(f"Duration: {duration_min} min | Station: {station}")
+logger.info("Steps: record → transcribe → chunk_analyze → deferred_resolve → resolve_hosts → enrich_parts → store")
 logger.info("=" * 70 + "\n")
 
 init_db()
@@ -85,9 +97,9 @@ logger.info("✓ Database initialized\n")
 try:
     orchestrator = PipelineOrchestrator()
     episode = orchestrator.run(
-        station="${STATION}",
-        duration_seconds=${DURATION},
-        output_dir=Path("${OUTPUT_DIR}"),
+        station=station,
+        duration_seconds=duration,
+        output_dir=output_dir,
     )
 
     logger.info("\n" + "=" * 70)
@@ -95,25 +107,16 @@ try:
     logger.info("=" * 70)
     logger.info(f"  Episode ID  : {episode.id}")
     logger.info(f"  Status      : {episode.status}")
-    logger.info(f"  Duration    : {episode.duration:.1f}s ({episode.duration/60:.1f} min)")
-    logger.info(f"  Words       : {episode.word_count}")
-    logger.info(f"  Segments    : {len(episode.segments)}")
-
-    seg_by_type = {}
-    for s in episode.segments:
-        seg_by_type[s.type] = seg_by_type.get(s.type, 0) + 1
-    for t, c in sorted(seg_by_type.items()):
-        logger.info(f"    {t}: {c}")
 
     from talk_show_analyzer.db import get_session
-    from talk_show_analyzer.models import SpeakerIdentity
+    from talk_show_analyzer.models import SpeakerIdentity, PartORM, MergedTopic
     with get_session() as session:
-        identities = (
-            session.query(SpeakerIdentity)
-            .filter(SpeakerIdentity.episode_id == episode.id)
-            .all()
-        )
-        logger.info(f"  Speaker Identities ({len(identities)} total)")
+        identities = session.query(SpeakerIdentity).filter_by(episode_id=episode.id).all()
+        parts      = session.query(PartORM).filter_by(episode_id=episode.id).all()
+        topics     = session.query(MergedTopic).filter_by(episode_id=episode.id).all()
+        logger.info(f"  Speakers    : {len(identities)}")
+        logger.info(f"  Parts       : {len(parts)} — " + ", ".join(p.type for p in parts))
+        logger.info(f"  Topics      : {len(topics)}")
 
     logger.info("")
 

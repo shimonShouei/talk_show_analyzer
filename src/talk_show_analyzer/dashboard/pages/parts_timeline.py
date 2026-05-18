@@ -118,6 +118,8 @@ def load_parts(episode_id: int, db_url: str | None = None) -> list[dict[str, Any
                         "guest_labels": p.guest_labels or [],
                         "unknown_labels": p.unknown_labels or [],
                         "n_topics": n_topics,
+                        "speaker_analyses": p.speaker_analyses or [],
+                        "qa_pairs": p.qa_pairs or [],
                     }
                 )
     except Exception as exc:
@@ -349,6 +351,112 @@ else:
     st.info("No parts found for this episode.")
 
 st.markdown("---")
+
+# ── per-part stance & tone ────────────────────────────────────────────────────
+content_parts = [p for p in parts if p["type"] not in ("jingle", "commercial", "news")]
+if content_parts and any(p["speaker_analyses"] for p in content_parts):
+    st.subheader("Per-Part Speaker Stance & Tone")
+
+    TONE_COLORS: dict[str, str] = {
+        "aggressive": "#F44336",
+        "defensive": "#FF9800",
+        "calm": "#4CAF50",
+        "sarcastic": "#9C27B0",
+        "emotional": "#E91E63",
+        "factual": "#2196F3",
+        "evasive": "#795548",
+        "enthusiastic": "#00BCD4",
+        "dismissive": "#FF5722",
+        "uncertain": "#9E9E9E",
+    }
+
+    for p in content_parts:
+        analyses = p["speaker_analyses"]
+        if not analyses:
+            continue
+        mm_s = int(p["start_seconds"] // 60)
+        ss_s = int(p["start_seconds"] % 60)
+        mm_e = int(p["end_seconds"] // 60)
+        ss_e = int(p["end_seconds"] % 60)
+        header = f"**Part {p['idx']} — {p['type']}** ({mm_s:02d}:{ss_s:02d} – {mm_e:02d}:{ss_e:02d})"
+        with st.expander(header, expanded=False):
+            for sa in analyses:
+                tone = sa.get("tone", "calm")
+                tone_color = TONE_COLORS.get(tone, "#9E9E9E")
+                hate_score = sa.get("hate_score", 0.0)
+                hate_level = sa.get("hate_level_max", "none")
+                stance = sa.get("stance_summary_he", "")
+                topics_he = sa.get("topics_he", [])
+
+                cols = st.columns([2, 1, 1, 3])
+                with cols[0]:
+                    st.markdown(f"**{sa['speaker_label']}**")
+                with cols[1]:
+                    st.markdown(
+                        f"<span style='background:{tone_color};color:white;padding:2px 8px;"
+                        f"border-radius:4px;font-size:0.8em'>{tone}</span>",
+                        unsafe_allow_html=True,
+                    )
+                with cols[2]:
+                    if hate_score > 0.1:
+                        st.markdown(
+                            f"<span style='color:#F44336;font-size:0.85em'>"
+                            f"⚠ {hate_level} ({hate_score:.2f})</span>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(
+                            "<span style='color:#9E9E9E;font-size:0.85em'>✓ civil</span>",
+                            unsafe_allow_html=True,
+                        )
+                with cols[3]:
+                    if stance:
+                        st.caption(stance)
+                    if topics_he:
+                        st.markdown(
+                            " · ".join(
+                                f"<span style='background:#E3F2FD;padding:1px 6px;"
+                                f"border-radius:3px;font-size:0.8em'>{t}</span>"
+                                for t in topics_he
+                            ),
+                            unsafe_allow_html=True,
+                        )
+
+    st.markdown("---")
+
+# ── per-interview Q&A pairs ───────────────────────────────────────────────────
+interview_parts = [p for p in parts if p["type"] == "interview" and p["qa_pairs"]]
+if interview_parts:
+    st.subheader("Interview Q&A Pairs")
+    for p in interview_parts:
+        mm_s = int(p["start_seconds"] // 60)
+        ss_s = int(p["start_seconds"] % 60)
+        guests = ", ".join(p["guest_labels"]) or "unknown guest"
+        header = f"**Interview {p['idx']}** — {guests} ({mm_s:02d}:{ss_s:02d})"
+        with st.expander(header, expanded=False):
+            for i, qa in enumerate(p["qa_pairs"], 1):
+                q_text = qa.get("question_text_he", "")
+                a_text = qa.get("answer_text_he", "")
+                topic = qa.get("topic_label_he", "")
+                t_start = int(qa.get("start_seconds", 0))
+                mm_q, ss_q = divmod(t_start, 60)
+                st.markdown(
+                    f"**Q{i}** <span style='color:#9E9E9E;font-size:0.8em'>"
+                    f"{mm_q:02d}:{ss_q:02d}  ·  {topic}</span>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f"<div style='background:#F5F5F5;padding:8px 12px;border-radius:4px;"
+                    f"margin-bottom:4px;direction:rtl'>{q_text}</div>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f"<div style='background:#E8F5E9;padding:8px 12px;border-radius:4px;"
+                    f"margin-bottom:12px;direction:rtl'>{a_text}</div>",
+                    unsafe_allow_html=True,
+                )
+
+    st.markdown("---")
 
 # ── hate heatmap ─────────────────────────────────────────────────────────────
 st.subheader("Speaker × Topic Hate-Proxy Heatmap")

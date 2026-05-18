@@ -577,9 +577,11 @@ class ThematicAnalyzer:
             data = extract_fenced_json(raw)
         except (json.JSONDecodeError, anthropic.APIError, ValueError) as e:
             raw_preview = locals().get("raw", "")[:300].replace("\n", " ")
+            _resp = locals().get("response")
+            stop_reason = _resp.stop_reason if _resp is not None else "n/a"
             logger.error(
                 f"Deep analysis call failed for {merged['topic_id']}: {e} | "
-                f"stop_reason={response.stop_reason!r} | response_preview={raw_preview!r}"
+                f"stop_reason={stop_reason!r} | response_preview={raw_preview!r}"
             )
             return None
 

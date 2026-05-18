@@ -638,6 +638,160 @@ class UnifiedSpeakerIdentifier:
         return results
 
 
+DEFERRED_RESOLVE_SYSTEM = """You are doing a second-pass identification of unrecognized speakers in an Israeli Hebrew radio transcript.
+
+A first identification pass has already named some speakers. Your task is to identify the REMAINING UNKNOWN speakers by looking for indirect attributions anywhere in the transcript — especially near the end of speaking segments.
+
+Common Israeli radio patterns that reveal a speaker's identity:
+- Host thanks guest at end: "תודה רבה [NAME]" / "תודה [NAME] על הדברים" → that guest is [NAME]
+- Host retrospective: "דיברנו עם [NAME]" / "היה אתנו [NAME]" → that guest was [NAME]
+- Direct address by host: "בוא [NAME]", "תגיד לי [NAME]", "פרופסור [NAME]" → addressed speaker is [NAME]
+- Self-introduction: "אני [NAME]" / "שמי [NAME]" → speaking speaker is [NAME]
+- Caller greeting: "שלום [NAME] מ-[CITY]" → that caller is [NAME]
+- Attribution: "כך אמר [NAME]" immediately after a long monologue → that speaker was [NAME]
+
+STRICT rules:
+- Only assign names with confidence ≥ 0.7 and explicit textual evidence
+- Do NOT guess from context alone
+- Unknown is always better than a wrong name
+- Do not re-identify already-named speakers"""
+
+DEFERRED_RESOLVE_PROMPT = """Unknown speakers to identify: {unknown_labels}
+
+Already identified (for context only — do not change these):
+{known_summary}
+
+Full transcript excerpt (focus on segments involving the unknown speakers and what others say TO or ABOUT them):
+{transcript_excerpt}
+
+Return a JSON array — one object per unknown speaker you can identify with confidence ≥ 0.7.
+Skip speakers you cannot identify. Return an empty array [] if none can be resolved.
+
+[
+  {{
+    "speaker_label": "SPEAKER_NN",
+    "name_he": "שם בעברית",
+    "name_en": "Name in English",
+    "role": "host|guest|caller|unknown",
+    "confidence": 0.0-1.0,
+    "evidence": "exact quote proving the identification"
+  }}
+]"""
+
+_DEFERRED_MAX_TRANSCRIPT_CHARS = 10_000
+
+
+def deferred_resolve_speakers(
+    transcript: "TranscriptionResult",
+    resolved: dict[str, "ResolvedSpeaker"],
+    client: anthropic.Anthropic,
+    model: str = "claude-haiku-4-5-20251001",
+) -> dict[str, "ResolvedSpeaker"]:
+    """Second-pass identification: fill in Unknown speakers using indirect attributions.
+
+    Looks for patterns the per-chunk pass misses — thank-you closings, retrospective
+    mentions, host direct address to the guest — which appear scattered across the
+    full transcript rather than concentrated in naming-moment windows.
+
+    Returns an updated copy of `resolved`; existing non-Unknown entries are unchanged.
+    Makes at most one Haiku API call; skips entirely if all speakers are already resolved.
+    """
+    unknown_labels = [label for label, rs in resolved.items() if rs.name_en == "Unknown"]
+    if not unknown_labels:
+        logger.debug("deferred_resolve: all speakers already identified, skipping")
+        return resolved
+
+    logger.info(f"deferred_resolve: {len(unknown_labels)} unknown speaker(s): {unknown_labels}")
+
+    known_summary = "\n".join(
+        f"  {label} = {rs.name_en} ({rs.role})"
+        for label, rs in sorted(resolved.items())
+        if rs.name_en != "Unknown"
+    ) or "  (none yet)"
+
+    # Build a focused transcript excerpt: lines where an unknown speaker speaks
+    # plus lines where other speakers address them (search up to 3 segs after each unknown line).
+    unknown_set = set(unknown_labels)
+    selected_lines: list[str] = []
+    seen_indices: set[int] = set()
+    segs = transcript.segments
+
+    for i, seg in enumerate(segs):
+        if seg.speaker not in unknown_set:
+            continue
+        for j in range(max(0, i - 1), min(len(segs), i + 4)):
+            if j not in seen_indices:
+                s = segs[j]
+                selected_lines.append(f"[{s.start:.0f}s] {s.speaker}: {s.text}")
+                seen_indices.add(j)
+
+    # If very few lines selected, also include segments where known speakers
+    # might be addressing or thanking an unknown speaker.
+    if len(selected_lines) < 20:
+        for i, seg in enumerate(segs):
+            if seg.speaker in unknown_set:
+                continue
+            text = seg.text or ""
+            if any(pat in text for pat in HEBREW_NAMING_PATTERNS + ["תודה", "היה אתנו", "דיברנו"]):
+                if i not in seen_indices:
+                    selected_lines.append(f"[{seg.start:.0f}s] {seg.speaker}: {text}")
+                    seen_indices.add(i)
+
+    transcript_excerpt = "\n".join(selected_lines)
+    if len(transcript_excerpt) > _DEFERRED_MAX_TRANSCRIPT_CHARS:
+        transcript_excerpt = transcript_excerpt[:_DEFERRED_MAX_TRANSCRIPT_CHARS] + "\n[truncated]"
+
+    prompt = DEFERRED_RESOLVE_PROMPT.format(
+        unknown_labels=", ".join(unknown_labels),
+        known_summary=known_summary,
+        transcript_excerpt=transcript_excerpt,
+    )
+
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            temperature=0,
+            system=[{"type": "text", "text": DEFERRED_RESOLVE_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = response.content[0].text.strip() if response.content else ""
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw).strip()
+        data: list[dict] = json.loads(raw) if raw else []
+    except Exception as exc:
+        logger.warning(f"deferred_resolve: API call failed: {exc}")
+        return resolved
+
+    updated = dict(resolved)
+    resolved_count = 0
+    for item in data:
+        label = item.get("speaker_label", "")
+        if label not in unknown_set:
+            continue
+        confidence = float(item.get("confidence", 0.0))
+        name_en = item.get("name_en", "Unknown") or "Unknown"
+        if confidence < 0.7 or name_en == "Unknown":
+            continue
+        updated[label] = ResolvedSpeaker(
+            speaker_label=label,
+            name_he=item.get("name_he", "Unknown") or "Unknown",
+            name_en=name_en,
+            role=(item.get("role") or "unknown").lower(),
+            confidence=confidence,
+        )
+        logger.info(
+            f"  deferred_resolve: {label} → {name_en} "
+            f"(conf={confidence:.2f}, evidence={item.get('evidence', '')!r})"
+        )
+        resolved_count += 1
+
+    logger.info(
+        f"deferred_resolve complete: {resolved_count}/{len(unknown_labels)} unknown speaker(s) resolved"
+    )
+    return updated
+
+
 def consolidate_speakers(
     chunk_analyses: list,  # list[ChunkAnalysis] — imported lazily to avoid circular
     label_map: dict[str, str],  # original_label → canonical_label from acoustic merge

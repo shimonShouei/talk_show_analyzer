@@ -16,13 +16,16 @@ from talk_show_analyzer.recorder import record_station
 from talk_show_analyzer.transcription import Transcriber
 from talk_show_analyzer.analysis import ThematicAnalyzer
 from talk_show_analyzer.analysis.chunk_analyzer import ChunkAnalyzer, chunk_analyses_to_thematic_chunks
-from talk_show_analyzer.analysis.structural_segmenter import Part, assemble_parts_from_chunks, segment_into_parts
+from talk_show_analyzer.analysis.qa_extractor import NamedQAExtractor
+from talk_show_analyzer.analysis.speaker_part_analyzer import SpeakerPartAnalyzer
+from talk_show_analyzer.analysis.structural_segmenter import Part, PartType, assemble_parts_from_chunks, segment_into_parts
 from talk_show_analyzer.analysis.thematic_analyzer import TopicAnalysis
 from talk_show_analyzer.identification import UnifiedSpeakerIdentifier
 from talk_show_analyzer.identification.host_resolver import HostResolution, HostResolver
 from talk_show_analyzer.identification.llm_identifier import (
     ResolvedSpeaker,
     consolidate_speakers,
+    deferred_resolve_speakers,
     _merge_speakers_acoustic,
 )
 from talk_show_analyzer.identification.reference_registry import load_registry, match_to_references
@@ -64,7 +67,9 @@ class PipelineOrchestrator:
         "record",
         "transcribe",
         "chunk_analyze",
+        "deferred_resolve",
         "resolve_hosts",
+        "enrich_parts",
         "store",
     ]
 
@@ -78,6 +83,8 @@ class PipelineOrchestrator:
         self.chunk_analyzer = ChunkAnalyzer()
         self.host_resolver = HostResolver()
         self.thematic_analyzer = ThematicAnalyzer()
+        self.speaker_part_analyzer = SpeakerPartAnalyzer()
+        self.qa_extractor = NamedQAExtractor()
 
     def run(
         self,
@@ -152,14 +159,30 @@ class PipelineOrchestrator:
                 chunk_result = self._load_chunk_analyze_results(episode_id, transcript)
             speaker_identities, parts, topic_analyses = chunk_result
 
-            # Step 4: Resolve hosts against the station schedule
+            # Step 4: Deferred name resolution — fill in Unknown speakers via indirect mentions
+            deferred_result = self._run_step_with_checkpoint(
+                episode_id,
+                "deferred_resolve",
+                lambda: self._step_deferred_resolve(transcript, speaker_identities, episode_id),
+            )
+            if deferred_result is not None:
+                speaker_identities = deferred_result
+
+            # Step 5: Resolve hosts against the station schedule
             self._run_step_with_checkpoint(
                 episode_id,
                 "resolve_hosts",
                 lambda: self._step_resolve_hosts(station, recorded_at, speaker_identities),
             )
 
-            # Step 5: Store
+            # Step 6: Enrich parts — per-part stance analysis + Q&A extraction
+            self._run_step_with_checkpoint(
+                episode_id,
+                "enrich_parts",
+                lambda: self._step_enrich_parts(episode_id, parts, transcript),
+            )
+
+            # Step 7: Store
             self._run_step_with_checkpoint(
                 episode_id,
                 "store",
@@ -265,10 +288,22 @@ class PipelineOrchestrator:
             if chunk_result is None:
                 chunk_result = self._load_chunk_analyze_results(episode_id, transcript)
             speaker_identities, parts, topic_analyses = chunk_result
+            deferred_result = self._run_step_with_checkpoint(
+                episode_id,
+                "deferred_resolve",
+                lambda: self._step_deferred_resolve(transcript, speaker_identities, episode_id),
+            )
+            if deferred_result is not None:
+                speaker_identities = deferred_result
             self._run_step_with_checkpoint(
                 episode_id,
                 "resolve_hosts",
                 lambda: self._step_resolve_hosts(station, recorded_at, speaker_identities),
+            )
+            self._run_step_with_checkpoint(
+                episode_id,
+                "enrich_parts",
+                lambda: self._step_enrich_parts(episode_id, parts, transcript),
             )
             self._run_step_with_checkpoint(
                 episode_id,
@@ -370,12 +405,26 @@ class PipelineOrchestrator:
                 ep_station = session.query(Station).filter_by(id=ep.station_id).first()
                 ep_station_name = ep_station.name if ep_station else "unknown"
 
+            deferred_result = self._run_step_with_checkpoint(
+                episode_id,
+                "deferred_resolve",
+                lambda: self._step_deferred_resolve(transcript, speaker_identities, episode_id),
+            )
+            if deferred_result is not None:
+                speaker_identities = deferred_result
+
             self._run_step_with_checkpoint(
                 episode_id,
                 "resolve_hosts",
                 lambda: self._step_resolve_hosts(
                     ep_station_name, ep_recorded_at, speaker_identities
                 ),
+            )
+
+            self._run_step_with_checkpoint(
+                episode_id,
+                "enrich_parts",
+                lambda: self._step_enrich_parts(episode_id, parts, transcript),
             )
 
             self._run_step_with_checkpoint(
@@ -792,6 +841,129 @@ class PipelineOrchestrator:
                 )
             logger.info(f"Reloaded {len(out)} resolved speakers from DB for ep {episode_id}")
             return out
+
+    def _step_deferred_resolve(
+        self,
+        transcript: TranscriptionResult,
+        resolved: dict[str, ResolvedSpeaker],
+        episode_id: int,
+    ) -> dict[str, ResolvedSpeaker]:
+        """Second-pass speaker identification: fill in Unknown speakers via indirect mentions."""
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        updated = deferred_resolve_speakers(transcript, resolved, client)
+
+        # Persist any newly resolved speakers to DB.
+        newly_resolved = {
+            label: rs
+            for label, rs in updated.items()
+            if rs.name_en != "Unknown"
+            and resolved.get(label, ResolvedSpeaker(label, "Unknown", "Unknown", "unknown", 0.0)).name_en == "Unknown"
+        }
+        if newly_resolved:
+            with get_session() as session:
+                for label, rs in newly_resolved.items():
+                    person = session.query(Person).filter_by(name_en=rs.name_en).first()
+                    if not person:
+                        person = Person(name_he=rs.name_he, name_en=rs.name_en, role=rs.role)
+                        session.add(person)
+                        session.flush()
+                    # Update existing SpeakerIdentity row for this label.
+                    identity = (
+                        session.query(SpeakerIdentity)
+                        .filter_by(episode_id=episode_id, speaker_label=label)
+                        .first()
+                    )
+                    if identity:
+                        identity.person_id = person.id
+                        identity.role = rs.role
+                        identity.confidence = rs.confidence
+                        identity.method = "deferred_resolve"
+                    else:
+                        session.add(SpeakerIdentity(
+                            episode_id=episode_id,
+                            speaker_label=label,
+                            person_id=person.id,
+                            role=rs.role,
+                            confidence=rs.confidence,
+                            method="deferred_resolve",
+                            evidence={},
+                        ))
+                session.commit()
+            logger.info(f"deferred_resolve: persisted {len(newly_resolved)} newly resolved speaker(s)")
+
+        return updated
+
+    def _step_enrich_parts(
+        self, episode_id: int, parts: list[Part], transcript: TranscriptionResult
+    ) -> dict:
+        """Per-part enrichment: speaker stance analysis + Q&A extraction.
+
+        Skips JINGLE / COMMERCIAL / NEWS parts (no discourse to analyze).
+        Uses the transcript to attach segments to each part (parts from
+        assemble_parts_from_chunks have no segments populated).
+        Results are stored as JSON directly on the PartORM rows.
+        """
+        _SKIP_TYPES = {PartType.JINGLE, PartType.COMMERCIAL, PartType.NEWS}
+
+        # Attach transcript segments to each part by time range.
+        segs = sorted(transcript.segments, key=lambda s: s.start)
+        enriched_parts: list[Part] = []
+        for p in parts:
+            if p.type in _SKIP_TYPES:
+                continue
+            part_segs = [s for s in segs if s.start >= p.start and s.end <= p.end + 1.0]
+            enriched = Part(
+                type=p.type,
+                start=p.start,
+                end=p.end,
+                segments=part_segs,
+                host_labels=p.host_labels,
+                guest_labels=p.guest_labels,
+                unknown_labels=p.unknown_labels,
+            )
+            enriched_parts.append((parts.index(p), enriched))
+
+        logger.info(
+            f"enrich_parts: {len(enriched_parts)} content part(s) "
+            f"(skipping {len(parts) - len(enriched_parts)} boundary/news parts)"
+        )
+
+        # Run LLM analysis for each part (outside session — API calls can be slow).
+        results: list[tuple[int, list, list]] = []  # (idx, speaker_analyses, qa_pairs)
+        for idx, part in enriched_parts:
+            speaker_analyses = self.speaker_part_analyzer.analyze(part)
+            qa_pairs = self.qa_extractor.extract(part) if part.type == PartType.INTERVIEW else []
+            results.append((idx, speaker_analyses, qa_pairs))
+
+        # Persist all results in a single session.
+        total_analyses = 0
+        total_qa = 0
+        with get_session() as session:
+            orm_parts = (
+                session.query(PartORM)
+                .filter_by(episode_id=episode_id)
+                .order_by(PartORM.idx)
+                .all()
+            )
+            orm_by_idx = {row.idx: row for row in orm_parts}
+
+            for idx, speaker_analyses, qa_pairs in results:
+                orm_row = orm_by_idx.get(idx)
+                if orm_row is None:
+                    logger.warning(f"enrich_parts: no PartORM row for part idx={idx}, skipping")
+                    continue
+                orm_row.speaker_analyses = [a.model_dump() for a in speaker_analyses]
+                orm_row.qa_pairs = [p.model_dump() for p in qa_pairs]
+                total_analyses += len(speaker_analyses)
+                total_qa += len(qa_pairs)
+
+            session.commit()
+
+        logger.info(
+            f"enrich_parts complete: {total_analyses} speaker analyses, {total_qa} Q&A pairs"
+        )
+        return {"speaker_analyses": total_analyses, "qa_pairs": total_qa}
 
     def _step_store(
         self,
