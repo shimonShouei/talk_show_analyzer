@@ -758,7 +758,9 @@ def deferred_resolve_speakers(
         raw = response.content[0].text.strip() if response.content else ""
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw).strip()
-        data: list[dict] = json.loads(raw) if raw else []
+        from talk_show_analyzer.analysis.utils import parse_leading_json
+
+        data: list[dict] = parse_leading_json(raw) if raw else []
     except Exception as exc:
         logger.warning(f"deferred_resolve: API call failed: {exc}")
         return resolved

@@ -33,7 +33,7 @@ Ignore non-content segments (jingles, ads, station IDs, music, weather) — emit
 
 First, think step-by-step inside <thinking>...</thinking> tags about the flow of the window: who is speaking, what subject they're on, where the pivots are. This is private scratch space.
 
-Then, after </thinking>, output ONLY a fenced ```json``` block.
+Keep the <thinking> block SHORT: at most ~120 words of terse notes (bullet fragments, no full prose, do not restate the transcript). Then, after </thinking>, output ONLY a fenced ```json``` block.
 
 ## JSON output
 
@@ -86,7 +86,7 @@ Do NOT merge superficially-similar chunks that are actually different events.
 
 Inside <thinking>...</thinking>, walk through the show's thematic flow: list the headlines you would give a listener, note returns, note transitions. Justify each merge.
 
-After </thinking>, emit ONLY a fenced ```json``` block.
+Keep the <thinking> block SHORT: at most ~120 words of terse notes (bullet fragments, no full prose, do not restate the transcript). After </thinking>, emit ONLY a fenced ```json``` block.
 
 ## JSON output
 
@@ -139,7 +139,7 @@ Inside <thinking>...</thinking> first, do these steps in order:
 4. Scan for hate-speech / evaluative talk against the taxonomy above.
 5. ONLY THEN, for each speaker, decide stance + write a 1-2 sentence Hebrew opinion summary that quotes or paraphrases what THEY said (not the show's overall view).
 
-After </thinking>, emit ONLY a fenced ```json``` block.
+Keep the <thinking> block SHORT: at most ~120 words of terse notes (bullet fragments, no full prose, do not restate the transcript). After </thinking>, emit ONLY a fenced ```json``` block.
 
 ## JSON output
 

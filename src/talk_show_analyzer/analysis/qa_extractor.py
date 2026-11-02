@@ -123,7 +123,7 @@ class NamedQAExtractor:
         try:
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=4000,
+                max_tokens=12000,  # long interview parts can exceed 4000 tokens of pairs
                 temperature=0,
                 system=[
                     {

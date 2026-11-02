@@ -58,7 +58,7 @@ Key rule: if all LIVE speakers are hosts (guests/callers = 0), classify as "host
 
 ## JSON Schema
 
-First reason inside <thinking>...</thinking>, then output ONLY a fenced ```json``` block:
+First reason inside <thinking>...</thinking> (Keep the <thinking> block SHORT: at most ~120 words of terse notes (bullet fragments, no full prose, do not restate the transcript).), then output ONLY a fenced ```json``` block:
 
 ```json
 {
@@ -154,24 +154,35 @@ class ChunkAnalyzer:
         )
 
         results: list[ChunkAnalysis] = []
-        with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as pool:
-            futures = {
-                pool.submit(self._analyze_window, i, window, total, episode_duration): i
-                for i, window in enumerate(windows)
-            }
-            for future in as_completed(futures):
-                idx = futures[future]
-                try:
-                    ca = future.result()
-                    if ca is not None:
-                        results.append(ca)
-                        logger.debug(
-                            f"  chunk {idx} ({ca.start:.0f}s-{ca.end:.0f}s): "
-                            f"{len(ca.speaker_roles)} roles, {len(ca.topics)} topics, "
-                            f"part={ca.part_type}"
-                        )
-                except Exception as e:
-                    logger.error(f"  chunk {idx} failed: {e}")
+        if settings.llm_use_batch:
+            from talk_show_analyzer.analysis.llm_batch import run_batched
+
+            batched = run_batched(
+                self,
+                lambda iw: self._analyze_window(iw[0], iw[1], total, episode_duration),
+                list(enumerate(windows)),
+                label="chunk_analyze",
+            )
+            results = [ca for ca in batched if ca is not None]
+        else:
+            with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as pool:
+                futures = {
+                    pool.submit(self._analyze_window, i, window, total, episode_duration): i
+                    for i, window in enumerate(windows)
+                }
+                for future in as_completed(futures):
+                    idx = futures[future]
+                    try:
+                        ca = future.result()
+                        if ca is not None:
+                            results.append(ca)
+                            logger.debug(
+                                f"  chunk {idx} ({ca.start:.0f}s-{ca.end:.0f}s): "
+                                f"{len(ca.speaker_roles)} roles, {len(ca.topics)} topics, "
+                                f"part={ca.part_type}"
+                            )
+                    except Exception as e:
+                        logger.error(f"  chunk {idx} failed: {e}")
 
         results.sort(key=lambda c: c.start)
         n_failed = sum(1 for c in results if getattr(c, "failed", False))

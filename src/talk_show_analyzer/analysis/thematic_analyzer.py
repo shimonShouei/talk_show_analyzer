@@ -597,6 +597,9 @@ class ThematicAnalyzer:
         data.setdefault("hate_speech_incidents", [])
         data.setdefault("speaker_insights", {})
         data.setdefault("thematic_flow_he", "")
+        # Haiku adds unrequested keys (e.g. thematic_flow_en); the schema forbids
+        # extras, which made every deep analysis fail validation twice.
+        data = _drop_extra_keys(data)
 
         try:
             return TopicAnalysis.model_validate(data)
@@ -615,3 +618,24 @@ class ThematicAnalyzer:
                 f"Validation failed twice on {merged['topic_id']}; dropping: {e}"
             )
             return None
+
+
+def _drop_extra_keys(data: dict) -> dict:
+    """Remove keys rejected by the schema's extra='forbid' (at any depth)."""
+    for _ in range(50):
+        try:
+            TopicAnalysis.model_validate(data)
+            return data
+        except ValidationError as e:
+            extras = [err["loc"] for err in e.errors() if err["type"] == "extra_forbidden"]
+            if not extras:
+                return data
+            for loc in extras:
+                node = data
+                try:
+                    for k in loc[:-1]:
+                        node = node[k]
+                    node.pop(loc[-1], None)
+                except (KeyError, IndexError, TypeError, AttributeError):
+                    return data
+    return data

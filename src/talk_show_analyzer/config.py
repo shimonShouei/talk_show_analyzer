@@ -42,6 +42,14 @@ class Settings(BaseSettings):
     # API
     anthropic_api_key: str = ""
 
+    # Claude models / cost controls (Sonnet stays selectable, e.g.
+    # LLM_DEEP_MODEL=claude-sonnet-4-6 LLM_ENRICH_MODEL=claude-sonnet-4-6)
+    llm_deep_model: str = "claude-haiku-4-5-20251001"  # thematic Stage 3 deep analysis
+    llm_enrich_model: str = "claude-haiku-4-5-20251001"  # enrich_parts (stance + Q&A)
+    llm_use_batch: bool = True  # Message Batches API (50% off, slower); falls back to sync
+    llm_batch_poll_seconds: int = 15
+    llm_batch_timeout_seconds: int = 3 * 3600
+
     # Storage
     output_dir: Path = Path("./data")
     s3_bucket: Optional[str] = None

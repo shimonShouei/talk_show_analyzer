@@ -33,6 +33,7 @@ from talk_show_analyzer.transcription.transcriber import (
     TranscriptionResult,
     SpeakerSegment,
 )
+from talk_show_analyzer.analysis.llm_batch import run_batched
 from talk_show_analyzer.pipeline.store import store_thematic_results
 
 # Make sure schedule providers (e.g. 103fm) are registered at import time.
@@ -83,9 +84,9 @@ class PipelineOrchestrator:
         )
         self.chunk_analyzer = ChunkAnalyzer()
         self.host_resolver = HostResolver()
-        self.thematic_analyzer = ThematicAnalyzer()
-        self.speaker_part_analyzer = SpeakerPartAnalyzer()
-        self.qa_extractor = NamedQAExtractor()
+        self.thematic_analyzer = ThematicAnalyzer(deep_model=settings.llm_deep_model)
+        self.speaker_part_analyzer = SpeakerPartAnalyzer(model=settings.llm_enrich_model)
+        self.qa_extractor = NamedQAExtractor(model=settings.llm_enrich_model)
 
     @staticmethod
     def _preflight() -> None:
@@ -672,9 +673,16 @@ class PipelineOrchestrator:
             logger.info(f"Stage 2: merged to {len(merged)} cross-show topics")
             for i, m in enumerate(merged):
                 logger.info(f"Stage 3: deep analysis {i+1}/{len(merged)} — {m['merged_title_he']}")
-                ta = self.thematic_analyzer.analyze_topic(m, thematic_chunks)
-                if ta is not None:
-                    topic_analyses.append(ta)
+            if settings.llm_use_batch:
+                stage3 = run_batched(
+                    self.thematic_analyzer,
+                    lambda m: self.thematic_analyzer.analyze_topic(m, thematic_chunks),
+                    merged,
+                    label="deep_analysis",
+                )
+            else:
+                stage3 = [self.thematic_analyzer.analyze_topic(m, thematic_chunks) for m in merged]
+            topic_analyses = [ta for ta in stage3 if ta is not None]
             logger.info(f"Thematic: completed {len(topic_analyses)} topic analyses")
 
         identified = sum(1 for r in resolved_speakers.values() if r.name_en != "Unknown")
@@ -948,10 +956,21 @@ class PipelineOrchestrator:
 
         # Run LLM analysis for each part (outside session — API calls can be slow).
         results: list[tuple[int, list, list]] = []  # (idx, speaker_analyses, qa_pairs)
-        for idx, part in enriched_parts:
+        def _enrich(item):
+            idx, part = item
             speaker_analyses = self.speaker_part_analyzer.analyze(part)
             qa_pairs = self.qa_extractor.extract(part) if part.type == PartType.INTERVIEW else []
-            results.append((idx, speaker_analyses, qa_pairs))
+            return (idx, speaker_analyses, qa_pairs)
+
+        if settings.llm_use_batch:
+            results = run_batched(
+                [self.speaker_part_analyzer, self.qa_extractor],
+                _enrich,
+                enriched_parts,
+                label="enrich_parts",
+            )
+        else:
+            results = [_enrich(item) for item in enriched_parts]
 
         # Persist all results in a single session.
         total_analyses = 0
