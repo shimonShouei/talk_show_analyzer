@@ -58,7 +58,7 @@ Key rule: if all LIVE speakers are hosts (guests/callers = 0), classify as "host
 
 ## JSON Schema
 
-First reason inside <thinking>...</thinking> (Keep the <thinking> block SHORT: at most ~120 words of terse notes (bullet fragments, no full prose, do not restate the transcript).), then output ONLY a fenced ```json``` block:
+First reason inside <thinking>...</thinking>, then output ONLY a fenced ```json``` block:
 
 ```json
 {
