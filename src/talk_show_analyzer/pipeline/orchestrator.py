@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from talk_show_analyzer.config import settings
 from talk_show_analyzer.db import get_session
 from talk_show_analyzer.models import Episode, PartORM, PipelineRun, SpeakerIdentity, Station, Segment, Person
+from talk_show_analyzer.identification.person_registry import get_or_create_person, upgrade_partial_names
 from talk_show_analyzer.recorder import record_station
 from talk_show_analyzer.transcription import Transcriber
 from talk_show_analyzer.analysis import ThematicAnalyzer
@@ -184,7 +185,9 @@ class PipelineOrchestrator:
             self._run_step_with_checkpoint(
                 episode_id,
                 "resolve_hosts",
-                lambda: self._step_resolve_hosts(station, recorded_at, speaker_identities),
+                lambda: self._step_resolve_hosts(
+                    station, recorded_at, speaker_identities, getattr(transcript, "duration", None)
+                ),
             )
 
             # Step 6: Enrich parts — per-part stance analysis + Q&A extraction
@@ -311,7 +314,9 @@ class PipelineOrchestrator:
             self._run_step_with_checkpoint(
                 episode_id,
                 "resolve_hosts",
-                lambda: self._step_resolve_hosts(station, recorded_at, speaker_identities),
+                lambda: self._step_resolve_hosts(
+                    station, recorded_at, speaker_identities, getattr(transcript, "duration", None)
+                ),
             )
             self._run_step_with_checkpoint(
                 episode_id,
@@ -430,7 +435,8 @@ class PipelineOrchestrator:
                 episode_id,
                 "resolve_hosts",
                 lambda: self._step_resolve_hosts(
-                    ep_station_name, ep_recorded_at, speaker_identities
+                    ep_station_name, ep_recorded_at, speaker_identities,
+                    getattr(transcript, "duration", None),
                 ),
             )
 
@@ -632,14 +638,8 @@ class PipelineOrchestrator:
             for original_label, rs in resolved_speakers.items():
                 person_id = None
                 if rs.name_en != "Unknown":
-                    person = session.query(Person).filter_by(name_en=rs.name_en).first()
-                    if not person:
-                        person = Person(
-                            name_he=rs.name_he, name_en=rs.name_en, role=rs.role
-                        )
-                        session.add(person)
-                        session.flush()
-                    person_id = person.id
+                    person = get_or_create_person(session, rs.name_he, rs.name_en, rs.role)
+                    person_id = person.id if person else None
                     rs.person_id = person_id
                 identity = SpeakerIdentity(
                     episode_id=episode_id,
@@ -716,7 +716,24 @@ class PipelineOrchestrator:
             output_json=audio_path.parent / f"{audio_path.stem}_transcript.json",
             language="he",
         )
-        return transcript
+        return self._apply_voice_merge(transcript, audio_path)
+
+    def _apply_voice_merge(self, transcript: TranscriptionResult, audio_path: Path) -> TranscriptionResult:
+        """Merge diarization labels that are the same voice (see speaker_merge)."""
+        thr = float(getattr(settings, "speaker_merge_threshold", 0) or 0)
+        if thr <= 0 or not transcript.segments:
+            return transcript
+        try:
+            from talk_show_analyzer.transcription.speaker_merge import merge_speakers_by_voice
+            before = len({s.speaker for s in transcript.segments})
+            merged, mapping = merge_speakers_by_voice(transcript, audio_path, threshold=thr)
+            after = len({s.speaker for s in merged.segments})
+            moved = {k: v for k, v in mapping.items() if k != v}
+            logger.info(f"voice merge (thr={thr}): {before} -> {after} labels; {moved}")
+            return merged
+        except Exception as exc:
+            logger.warning(f"voice merge skipped: {exc}")
+            return transcript
 
     def _step_identify_speakers(
         self, transcript: TranscriptionResult, content_segments: list, episode_id: int
@@ -735,6 +752,7 @@ class PipelineOrchestrator:
         station: str,
         recorded_at: datetime,
         resolved_speakers: dict[str, ResolvedSpeaker],
+        duration_seconds: float | None = None,
     ) -> HostResolution:
         """Match scheduled hosts against the LLM-identified speakers."""
         # recorded_at is stored as naive UTC (datetime.utcnow()); the schedule
@@ -743,7 +761,9 @@ class PipelineOrchestrator:
         if recorded_at.tzinfo is None:
             recorded_at = recorded_at.replace(tzinfo=timezone.utc)
         logger.info(f"Resolving hosts for {station} at {recorded_at.isoformat()}...")
-        res = self.host_resolver.resolve(station, recorded_at, resolved_speakers)
+        res = self.host_resolver.resolve(
+            station, recorded_at, resolved_speakers, duration_seconds=duration_seconds
+        )
         if res.schedule_available:
             logger.info(
                 f"Show: {res.show_name!r} | expected={res.expected_hosts} | "
@@ -867,55 +887,91 @@ class PipelineOrchestrator:
             logger.info(f"Reloaded {len(out)} resolved speakers from DB for ep {episode_id}")
             return out
 
+    def _scheduled_shows_for_episode(self, episode_id: int, duration_seconds: float | None = None) -> list:
+        """Shows on air during the episode (from the station schedule); [] on failure."""
+        from datetime import timedelta as _td
+        from talk_show_analyzer.recorder.schedules import get_scheduled_shows
+        try:
+            with get_session() as session:
+                ep = session.get(Episode, episode_id)
+                if ep is None:
+                    return []
+                station = ep.station.name if ep.station else ""
+                start = ep.recorded_at
+                duration = float(duration_seconds or ep.duration or 0)
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            return get_scheduled_shows(station, start, start + _td(seconds=duration))
+        except Exception as exc:  # schedule is a hint only
+            logger.warning(f"schedule lookup for episode {episode_id} failed: {exc}")
+            return []
+
     def _step_deferred_resolve(
         self,
         transcript: TranscriptionResult,
         resolved: dict[str, ResolvedSpeaker],
         episode_id: int,
     ) -> dict[str, ResolvedSpeaker]:
-        """Second-pass speaker identification: fill in Unknown speakers via indirect mentions."""
+        """Second-pass speaker identification: fill in Unknown speakers via indirect mentions,
+        then expand first-name/surname-only names to a unique full name (schedule hosts or
+        another speaker in the same episode)."""
         import anthropic as _anthropic
+        import copy as _copy
         client = _anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        updated = deferred_resolve_speakers(transcript, resolved, client)
 
-        # Persist any newly resolved speakers to DB.
-        newly_resolved = {
-            label: rs
-            for label, rs in updated.items()
-            if rs.name_en != "Unknown"
-            and resolved.get(label, ResolvedSpeaker(label, "Unknown", "Unknown", "unknown", 0.0)).name_en == "Unknown"
+        # episode.duration can still be 0 here; the transcript knows the real length.
+        shows = self._scheduled_shows_for_episode(
+            episode_id, getattr(transcript, "duration", None)
+        )
+        hosts: list[str] = []
+        for sh in shows:
+            hosts.extend(h for h in sh.hosts if h not in hosts)
+        hint = None
+        if shows:
+            hint = "Scheduled programmes during this recording (hosts may be substitutes):\n" + "\n".join(
+                f"  - {sh.show_name}: {', '.join(sh.hosts) or '?'}" for sh in shows
+            )
+            logger.info(f"deferred_resolve: schedule hint hosts={hosts}")
+
+        before = {k: _copy.copy(v) for k, v in resolved.items()}
+        updated = deferred_resolve_speakers(
+            transcript, resolved, client, schedule_hint=hint
+        )
+        updated = {k: _copy.copy(v) for k, v in updated.items()}
+        upgrades = upgrade_partial_names(updated, hosts)
+        for label, (old, new) in upgrades.items():
+            logger.info(f"name upgrade: {label} {old!r} -> {new!r}")
+
+        # Persist every label whose name or role changed.
+        changed = {
+            label: rs for label, rs in updated.items()
+            if label not in before
+            or (rs.name_he, rs.name_en, rs.role) != (before[label].name_he, before[label].name_en, before[label].role)
         }
-        if newly_resolved:
+        if changed:
             with get_session() as session:
-                for label, rs in newly_resolved.items():
-                    person = session.query(Person).filter_by(name_en=rs.name_en).first()
-                    if not person:
-                        person = Person(name_he=rs.name_he, name_en=rs.name_en, role=rs.role)
-                        session.add(person)
-                        session.flush()
-                    # Update existing SpeakerIdentity row for this label.
+                for label, rs in changed.items():
+                    person = get_or_create_person(session, rs.name_he, rs.name_en, rs.role)
+                    pid = person.id if person else None
+                    rs.person_id = pid
+                    method = "name_upgrade" if label in upgrades and before.get(label) and before[label].name_en != "Unknown" else "deferred_resolve"
                     identity = (
                         session.query(SpeakerIdentity)
                         .filter_by(episode_id=episode_id, speaker_label=label)
                         .first()
                     )
                     if identity:
-                        identity.person_id = person.id
+                        identity.person_id = pid
                         identity.role = rs.role
                         identity.confidence = rs.confidence
-                        identity.method = "deferred_resolve"
+                        identity.method = method
                     else:
                         session.add(SpeakerIdentity(
-                            episode_id=episode_id,
-                            speaker_label=label,
-                            person_id=person.id,
-                            role=rs.role,
-                            confidence=rs.confidence,
-                            method="deferred_resolve",
-                            evidence={},
+                            episode_id=episode_id, speaker_label=label, person_id=pid,
+                            role=rs.role, confidence=rs.confidence, method=method, evidence={},
                         ))
                 session.commit()
-            logger.info(f"deferred_resolve: persisted {len(newly_resolved)} newly resolved speaker(s)")
+            logger.info(f"deferred_resolve: persisted {len(changed)} changed speaker(s)")
 
         return updated
 

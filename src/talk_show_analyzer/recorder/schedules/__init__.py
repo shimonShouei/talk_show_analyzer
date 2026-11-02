@@ -6,6 +6,7 @@ from talk_show_analyzer.recorder.schedules.base import (
     SCHEDULE_PROVIDERS,
     register_provider,
     get_scheduled_show,
+    get_scheduled_shows,
 )
 from talk_show_analyzer.recorder.schedules.fm103 import FM103ScheduleProvider
 
@@ -17,5 +18,6 @@ __all__ = [
     "SCHEDULE_PROVIDERS",
     "register_provider",
     "get_scheduled_show",
+    "get_scheduled_shows",
     "FM103ScheduleProvider",
 ]

@@ -127,6 +127,14 @@ class ChunkAnalysis:
     raw_text: str = ""  # formatted window text (used as raw_text for Stage 3)
 
 
+_STRICT_RETRY_NOTE = (
+    "\n\nIMPORTANT (retry): your previous answer was cut off or was not valid JSON. "
+    "Keep <thinking> under 150 words of terse notes, then output ONLY the fenced "
+    "```json``` block. Make sure it is complete, valid JSON (escape any double quote "
+    "inside strings, e.g. use ״ for Hebrew acronyms like צה״ל)."
+)
+
+
 class ChunkAnalyzer:
     """Analyze each 5-minute transcript window in one parallel API call."""
 
@@ -137,6 +145,8 @@ class ChunkAnalyzer:
     def __init__(self, model: str = "claude-haiku-4-5-20251001"):
         self.model = model
         self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        # Never swapped by run_batched: used for synchronous per-chunk retries.
+        self._sync_client = self.client
 
     def analyze_all(self, transcript: TranscriptionResult) -> list[ChunkAnalysis]:
         """Analyze all windows in parallel. Returns list sorted by chunk start time."""
@@ -192,6 +202,31 @@ class ChunkAnalyzer:
             raise RuntimeError(f"ChunkAnalyzer: all {total} chunk API calls failed - aborting")
         return results
 
+    def _call_and_parse(self, client, model: str, user_content: str, max_tokens: int) -> dict:
+        response = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            temperature=0,
+            system=[
+                {
+                    "type": "text",
+                    "text": CHUNK_SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            messages=[{"role": "user", "content": user_content}],
+        )
+        text = safe_response_text(response)
+        try:
+            data = extract_fenced_json(text)
+        except Exception as e:
+            if getattr(response, "stop_reason", None) == "max_tokens":
+                raise ValueError(f"output truncated at max_tokens={max_tokens} ({e})") from e
+            raise
+        if not isinstance(data, dict):
+            raise ValueError(f"expected a JSON object, got {type(data).__name__}")
+        return data
+
     def _analyze_window(
         self,
         idx: int,
@@ -225,28 +260,38 @@ class ChunkAnalyzer:
             f"[Window {idx + 1}/{total_windows} | {start:.0f}s–{end:.0f}s | {position_hint}]\n\n"
         )
 
+        user_content = f"{context_header}Analyze this segment:\n\n{text}"
+        data = None
+        error: Exception | None = None
         try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=6000,
-                temperature=0,
-                system=[
-                    {
-                        "type": "text",
-                        "text": CHUNK_SYSTEM_PROMPT,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-                messages=[
-                    {
-                        "role": "user",
-                        "content": f"{context_header}Analyze this segment:\n\n{text}",
-                    }
-                ],
-            )
-            data = extract_fenced_json(safe_response_text(response))
-        except Exception as e:
-            logger.warning(f"Chunk {chunk_id} ({start:.0f}s-{end:.0f}s) analysis failed: {e}")
+            data = self._call_and_parse(self.client, self.model, user_content, 6000)
+        except Exception as e:  # noqa: BLE001 — parse/API errors → retry below
+            error = e
+
+        # Retry ladder for failed windows (typically a runaway <thinking> block that
+        # hits max_tokens before the JSON, or malformed JSON): synchronous retry with
+        # a strict brevity/JSON reminder, then optionally a stronger fallback model.
+        if data is None:
+            attempts = [(self.model, 12000)]
+            fb = settings.llm_chunk_fallback_model
+            if fb and fb != self.model:
+                attempts.append((fb, 12000))
+            for n, (model, max_tok) in enumerate(attempts, 1):
+                logger.warning(
+                    f"Chunk {chunk_id} ({start:.0f}s-{end:.0f}s) failed ({error}); "
+                    f"retry {n}/{len(attempts)} sync with {model}"
+                )
+                try:
+                    data = self._call_and_parse(
+                        self._sync_client, model, user_content + _STRICT_RETRY_NOTE, max_tok
+                    )
+                    logger.info(f"Chunk {chunk_id} retry {n} succeeded ({model})")
+                    break
+                except Exception as e:  # noqa: BLE001
+                    error = e
+
+        if data is None:
+            logger.warning(f"Chunk {chunk_id} ({start:.0f}s-{end:.0f}s) analysis failed: {error}")
             ca = ChunkAnalysis(
                 chunk_id=chunk_id, start=start, end=end, part_type="unknown", raw_text=text
             )

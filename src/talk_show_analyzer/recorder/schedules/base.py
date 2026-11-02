@@ -36,6 +36,11 @@ class ScheduleProvider(ABC):
         """Return the show airing at `when` (local Israel time), or None."""
         raise NotImplementedError
 
+    def fetch_for_window(self, start: datetime, end: datetime) -> list[ScheduledShow]:
+        """All shows overlapping [start, end]. Default: only the show at `start`."""
+        show = self.fetch_for_datetime(start)
+        return [show] if show else []
+
 
 SCHEDULE_PROVIDERS: dict[str, ScheduleProvider] = {}
 
@@ -56,3 +61,16 @@ def get_scheduled_show(station: str, when: datetime) -> Optional[ScheduledShow]:
     except Exception as exc:
         logger.warning(f"Schedule fetch failed for {station} @ {when}: {exc}")
         return None
+
+
+def get_scheduled_shows(station: str, start: datetime, end: datetime) -> list[ScheduledShow]:
+    """All shows on `station` overlapping [start, end]; [] on missing provider/failure."""
+    provider = SCHEDULE_PROVIDERS.get(station)
+    if provider is None:
+        logger.warning(f"No schedule provider registered for station '{station}'")
+        return []
+    try:
+        return provider.fetch_for_window(start, end)
+    except Exception as exc:
+        logger.warning(f"Schedule fetch failed for {station} @ {start}–{end}: {exc}")
+        return []

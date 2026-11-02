@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     # LLM_DEEP_MODEL=claude-sonnet-4-6 LLM_ENRICH_MODEL=claude-sonnet-4-6)
     llm_deep_model: str = "claude-haiku-4-5-20251001"  # thematic Stage 3 deep analysis
     llm_enrich_model: str = "claude-haiku-4-5-20251001"  # enrich_parts (stance + Q&A)
+    # Model for the last synchronous retry of a chunk window that failed twice
+    # (empty string disables the fallback).
+    llm_chunk_fallback_model: str = "claude-sonnet-4-6"
+    # Post-diarization voice merge of speaker labels (pyannote embeddings, cosine).
+    # 0.70 tuned on a 55-min 103FM hour: same-voice pairs scored 0.70-0.77, the
+    # closest pair of different people (two phone guests) 0.64. 0 disables.
+    speaker_merge_threshold: float = 0.70
     llm_use_batch: bool = True  # Message Batches API (50% off, slower); falls back to sync
     llm_batch_poll_seconds: int = 15
     llm_batch_timeout_seconds: int = 3 * 3600
