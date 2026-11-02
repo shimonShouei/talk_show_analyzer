@@ -174,7 +174,11 @@ class ChunkAnalyzer:
                     logger.error(f"  chunk {idx} failed: {e}")
 
         results.sort(key=lambda c: c.start)
-        logger.info(f"ChunkAnalyzer: {len(results)}/{total} chunks completed")
+        n_failed = sum(1 for c in results if getattr(c, "failed", False))
+        n_ok = len(results) - n_failed
+        logger.info(f"ChunkAnalyzer: {n_ok}/{total} chunks completed ({n_failed} failed)")
+        if total and n_ok == 0:
+            raise RuntimeError(f"ChunkAnalyzer: all {total} chunk API calls failed - aborting")
         return results
 
     def _analyze_window(
@@ -232,9 +236,11 @@ class ChunkAnalyzer:
             data = extract_fenced_json(safe_response_text(response))
         except Exception as e:
             logger.warning(f"Chunk {chunk_id} ({start:.0f}s-{end:.0f}s) analysis failed: {e}")
-            return ChunkAnalysis(
+            ca = ChunkAnalysis(
                 chunk_id=chunk_id, start=start, end=end, part_type="unknown", raw_text=text
             )
+            ca.failed = True  # type: ignore[attr-defined]
+            return ca
 
         speaker_roles = []
         for item in data.get("speaker_roles", []):

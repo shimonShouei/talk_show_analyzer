@@ -79,12 +79,22 @@ class PipelineOrchestrator:
         self.transcriber = Transcriber(
             device=settings.whisper_device,
             compute_type=settings.whisper_compute_type,
+            enable_diarization=settings.diarization_enabled,
         )
         self.chunk_analyzer = ChunkAnalyzer()
         self.host_resolver = HostResolver()
         self.thematic_analyzer = ThematicAnalyzer()
         self.speaker_part_analyzer = SpeakerPartAnalyzer()
         self.qa_extractor = NamedQAExtractor()
+
+    @staticmethod
+    def _preflight() -> None:
+        """Fail fast: without a key every LLM stage silently returns "unknown"
+        after the (slow) transcription has already run."""
+        if not settings.anthropic_api_key:
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set - LLM stages would silently produce empty output"
+            )
 
     def run(
         self,
@@ -103,6 +113,7 @@ class PipelineOrchestrator:
         Returns:
             Episode model instance from database
         """
+        self._preflight()
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -239,6 +250,7 @@ class PipelineOrchestrator:
         audio_path = Path(audio_path)
         if not audio_path.exists():
             raise FileNotFoundError(audio_path)
+        self._preflight()
 
         if duration_seconds is not None:
             trimmed = audio_path.parent / f"{audio_path.stem}_trim{duration_seconds}s.mp3"
