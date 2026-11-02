@@ -2,7 +2,7 @@
 
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -729,6 +729,11 @@ class PipelineOrchestrator:
         resolved_speakers: dict[str, ResolvedSpeaker],
     ) -> HostResolution:
         """Match scheduled hosts against the LLM-identified speakers."""
+        # recorded_at is stored as naive UTC (datetime.utcnow()); the schedule
+        # provider treats naive datetimes as Israel local time, shifting the
+        # lookup by 2-3h. Mark it as UTC so it is converted correctly.
+        if recorded_at.tzinfo is None:
+            recorded_at = recorded_at.replace(tzinfo=timezone.utc)
         logger.info(f"Resolving hosts for {station} at {recorded_at.isoformat()}...")
         res = self.host_resolver.resolve(station, recorded_at, resolved_speakers)
         if res.schedule_available:
@@ -993,5 +998,75 @@ class PipelineOrchestrator:
             episode.raw_text = transcript.raw_text
 
             store_thematic_results(session, episode, topic_analyses)
+            legacy = _backfill_legacy_dashboard_tables(session, episode_id)
+            session.commit()  # get_session() does not commit on exit
 
-        return {"merged_topics": len(topic_analyses)}
+        return {"merged_topics": len(topic_analyses), **legacy}
+
+
+_STANCE_SCORE = {"support": 1.0, "oppose": -1.0, "neutral": 0.0, "ambivalent": 0.0}
+
+
+def _backfill_legacy_dashboard_tables(session, episode_id: int) -> dict:
+    """Populate the legacy segments/topics/sentiment_results tables from the new
+    parts/merged_topics/speaker_insights so the older dashboard pages
+    (overview, topics, sentiment, episodes, conversation) show data.
+
+    Mapping: Part -> Segment, MergedTopic -> Topic (attached to the part that
+    contains its first time span), SpeakerInsight stance -> SentimentResult
+    (support=+1, oppose=-1, neutral/ambivalent=0; tone=stance).
+    """
+    from talk_show_analyzer.models import (
+        MergedTopic,
+        PartORM,
+        Segment as SegmentModel,
+        SentimentResult,
+        SpeakerInsightORM,
+        Topic as TopicModel,
+    )
+
+    if session.query(SegmentModel).filter_by(episode_id=episode_id).first():
+        return {"legacy_segments": 0}
+    parts = session.query(PartORM).filter_by(episode_id=episode_id).order_by(PartORM.idx).all()
+    topics = session.query(MergedTopic).filter_by(episode_id=episode_id).all()
+
+    def _first_start(mt) -> float:
+        spans = mt.time_spans or [[0.0, 0.0]]
+        return float(spans[0][0])
+
+    segs = []
+    for p in parts:
+        titles = [
+            mt.merged_title_he for mt in topics
+            if p.start_seconds - 1 <= _first_start(mt) < p.end_seconds
+        ]
+        seg = SegmentModel(
+            episode_id=episode_id, type=p.type, start=p.start_seconds,
+            end=p.end_seconds, summary="; ".join(titles) or p.type,
+        )
+        session.add(seg)
+        segs.append(seg)
+    session.flush()
+
+    n_topics = n_sent = 0
+    for mt in topics:
+        t0 = _first_start(mt)
+        seg = next((sg for sg in segs if sg.start - 1 <= t0 < sg.end), segs[0] if segs else None)
+        if seg is None:
+            break
+        topic = TopicModel(
+            segment_id=seg.id, name_he=mt.merged_title_he,
+            name_en=mt.merged_title_en or mt.merged_title_he, category=mt.category,
+            summary_he=mt.thematic_flow_he or "", summary_en="", is_main=True,
+        )
+        session.add(topic)
+        session.flush()
+        n_topics += 1
+        for ins in session.query(SpeakerInsightORM).filter_by(merged_topic_id=mt.id).all():
+            session.add(SentimentResult(
+                segment_id=seg.id, topic_id=topic.id, speaker_label=ins.speaker_label,
+                score=_STANCE_SCORE.get(ins.stance, 0.0), tone=ins.stance,
+                quotes=list(ins.evidence_quotes_he or []),
+            ))
+            n_sent += 1
+    return {"legacy_segments": len(segs), "legacy_topics": n_topics, "legacy_sentiments": n_sent}

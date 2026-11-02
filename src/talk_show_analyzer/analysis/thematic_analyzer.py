@@ -562,7 +562,7 @@ class ThematicAnalyzer:
         try:
             response = self.client.messages.create(
                 model=self.deep_model,
-                max_tokens=8000,
+                max_tokens=16000,  # 8000 was hit by the <thinking> preamble -> topic dropped
                 temperature=0,
                 system=[
                     {
