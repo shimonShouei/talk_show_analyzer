@@ -223,14 +223,16 @@ class Transcriber:
             # Feeding MP3 paths directly causes pyannote sample-count mismatches
             # (MP3 decoders return ~158895 samples for a 10s @16kHz chunk vs the
             # expected 160000); the dict form skips pyannote's internal decode.
-            import torchaudio
+            # Decode with faster-whisper's PyAV decoder (16kHz mono float32).
+            # torchaudio>=2.9 routes load() through torchcodec, which often fails
+            # to load its native libs on CPU-only installs.
+            import torch
+            from faster_whisper.audio import decode_audio
 
-            waveform, sr = torchaudio.load(str(audio_path))
-            if waveform.shape[0] > 1:
-                waveform = waveform.mean(dim=0, keepdim=True)
             target_sr = 16000
-            if sr != target_sr:
-                waveform = torchaudio.functional.resample(waveform, sr, target_sr)
+            waveform = torch.from_numpy(
+                decode_audio(str(audio_path), sampling_rate=target_sr)
+            ).unsqueeze(0)
             audio_input = {"waveform": waveform, "sample_rate": target_sr}
 
             diarization_kwargs = {"num_speakers": num_speakers} if num_speakers else {}
