@@ -1,0 +1,8 @@
+{
+ "window_sec": 10.0,
+ "hop_sec": 10.0,
+ "sr": 32000,
+ "target_rms_dbfs": -20,
+ "handcrafted": "librosa: rms stats, 20 mfcc mean/std, centroid/bandwidth/rolloff/flatness/zcr/flux mean/std, onset rate, low-energy frac, harmonic ratio, chroma std; computed at 16k",
+ "embedding": "PANNs Cnn14 (AudioSet) 2048-d clip embedding, 32k mono"
+}

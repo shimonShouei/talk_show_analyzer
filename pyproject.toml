@@ -12,6 +12,12 @@ authors = [{name = "Shimon", email = "shimon@example.com"}]
 dependencies = [
     # Audio processing
     "faster-whisper>=1.0.0",           # Free Whisper inference
+    # faster-whisper 1.2.1 decode_audio() calls av.open(..., metadata_errors="ignore").
+    # PyAV 19 removed that argument, and faster-whisper only requires av>=11, so an
+    # unpinned install resolves to a broken av. 15.1.0 is the runtime that worked
+    # on the box with this PyAV diarization decode. Drop the pin only when the
+    # installed faster-whisper no longer needs the removed argument.
+    "av==15.1.0",
     "pyannote.audio>=4.0,<5.0",        # Free diarization (v4 + community-1 model)
     "librosa>=0.10.0",                 # Audio utilities
     "pydub>=0.25.1",                   # Audio manipulation

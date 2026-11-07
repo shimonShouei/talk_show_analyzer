@@ -73,6 +73,14 @@ python scripts/init_db.py
 alembic upgrade head
 ```
 
+`scripts/init_db.py` only runs `Base.metadata.create_all` for the database in `DATABASE_URL`. It creates missing tables. It does not change columns on tables that already exist, does not record an Alembic revision, and does not seed data. Local SQLite files needed that step once because they started empty. `get_session()` does not create tables. An existing database, including one that already has data, should use `alembic upgrade head` (revisions `001`, `002` parts, `003` part enrichment).
+
+`av` is pinned to `15.1.0` because diarization decodes audio through faster-whisper's PyAV path, and PyAV 19 rejects the `metadata_errors` argument that faster-whisper 1.2.1 still passes.
+
+## Local experiments (not the pipeline)
+
+`tools/ads/`, `ops/`, and `experiments/audio_style_2026-11-07/` are notes from a November 2026 WSL laptop. They are not daily automation. Limits, including unverified fingerprint groups and the single-hour gold file, are in `docs/README_EXPORT.md`.
+
 ## Usage
 
 ### Record a live stream
