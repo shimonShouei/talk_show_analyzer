@@ -10,7 +10,7 @@ are missing entirely from the episode.
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Optional
 
 from loguru import logger
@@ -19,6 +19,7 @@ from talk_show_analyzer.identification.llm_identifier import ResolvedSpeaker
 from talk_show_analyzer.recorder.schedules import (
     ScheduledShow,
     get_scheduled_show,
+    get_scheduled_shows,
 )
 
 
@@ -47,19 +48,28 @@ def _matches(expected: str, candidate: str) -> bool:
 
 
 ScheduleFetcher = Callable[[str, datetime], Optional[ScheduledShow]]
+WindowFetcher = Callable[[str, datetime, datetime], list[ScheduledShow]]
 
 
 class HostResolver:
     """Reconcile schedule-provided hosts with LLM-identified speakers."""
 
-    def __init__(self, schedule_fetcher: Optional[ScheduleFetcher] = None):
+    def __init__(
+        self,
+        schedule_fetcher: Optional[ScheduleFetcher] = None,
+        window_fetcher: Optional[WindowFetcher] = None,
+    ):
         self._fetch = schedule_fetcher or get_scheduled_show
+        # Only use the multi-show lookup when no single-show fetcher was injected
+        # (keeps tests that stub `schedule_fetcher` working unchanged).
+        self._fetch_window = window_fetcher or (None if schedule_fetcher else get_scheduled_shows)
 
     def resolve(
         self,
         station: str,
         recorded_at: datetime,
         resolved_speakers: dict[str, ResolvedSpeaker],
+        duration_seconds: Optional[float] = None,
     ) -> HostResolution:
         host_speakers = {
             label: rs
@@ -67,7 +77,14 @@ class HostResolver:
             if rs.role == "host"
         }
 
-        show = self._fetch(station, recorded_at)
+        if duration_seconds and self._fetch_window is not None:
+            shows = self._fetch_window(
+                station, recorded_at, recorded_at + timedelta(seconds=duration_seconds)
+            )
+        else:
+            one = self._fetch(station, recorded_at)
+            shows = [one] if one else []
+        show = shows[0] if shows else None
 
         if show is None:
             unknown = [
@@ -82,7 +99,12 @@ class HostResolver:
                 unknown_hosts=unknown,
             )
 
-        expected = list(show.hosts)
+        expected: list[str] = []
+        for sh in shows:
+            for h in sh.hosts:
+                if h not in expected:
+                    expected.append(h)
+        show_name = " + ".join(sh.show_name for sh in shows)
 
         confirmed: list[tuple[str, str]] = []
         matched_expected: set[str] = set()
@@ -111,12 +133,12 @@ class HostResolver:
         logger.info(
             f"host resolution: confirmed={len(confirmed)} substitutes={len(substitutes)} "
             f"missing={len(missing)} unknown={len(unknown)} "
-            f"(show: {show.show_name!r})"
+            f"(show: {show_name!r}; expected={expected})"
         )
 
         return HostResolution(
             schedule_available=True,
-            show_name=show.show_name,
+            show_name=show_name,
             expected_hosts=expected,
             confirmed=confirmed,
             substitutes=substitutes,

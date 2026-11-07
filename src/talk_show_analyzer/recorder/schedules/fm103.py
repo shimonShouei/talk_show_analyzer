@@ -5,8 +5,9 @@ where N is the Israeli day index (1=Sunday … 7=Saturday). Each entry exposes a
 start time and a show name; end time is derived from the next entry.
 """
 
+import html as _html
 import re
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta
 from functools import lru_cache
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -67,6 +68,49 @@ def _extract_hosts(show_name: str) -> list[str]:
     return hosts
 
 
+_TITLE_PREFIX_RE = re.compile(r"^(?:פרופ['׳]?|פרופסור|ד[\"״]ר|דוקטור|עו[\"״]ד|השר|ח[\"״]כ)\s+")
+_OG_DESC_RE = re.compile(
+    r'<meta[^>]*property="og:description"[^>]*content="([^"]*)"', re.IGNORECASE
+)
+
+
+def _hosts_from_description(desc: Optional[str]) -> list[str]:
+    """Pull 2–3-word Hebrew person names out of a program blurb.
+
+    103FM show titles are often generic ("חמש בערב", "ספורט"); the program page's
+    og:description lists the hosts, e.g. "משדר האקטואליה ... עם פרופ' אריה אלדד
+    ורון קופמן, שהופכים ...". We split on punctuation, " עם " and the Hebrew
+    "and" prefix, strip titles, and keep short all-Hebrew pieces.
+    """
+    if not desc:
+        return []
+    names: list[str] = []
+    for chunk in re.split(r"[,.:;!?()\n]|\s+עם\s+|\s+ו(?=[א-ת])", desc):
+        piece = _TITLE_PREFIX_RE.sub("", chunk.strip())
+        words = piece.split()
+        if not 2 <= len(words) <= 3:
+            continue
+        if not all(re.fullmatch(r"[א-ת'׳\"״\-]+", w) for w in words):
+            continue
+        if piece not in names:
+            names.append(piece)
+    return names
+
+
+@lru_cache(maxsize=64)
+def _fetch_program_description(url: str, timeout: float) -> Optional[str]:
+    try:
+        resp = requests.get(
+            url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"}, timeout=timeout
+        )
+        resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 — description is optional enrichment
+        logger.debug(f"103fm: program page fetch failed for {url}: {exc}")
+        return None
+    m = _OG_DESC_RE.search(resp.text)
+    return _html.unescape(m.group(1)).strip() if m else None
+
+
 class FM103ScheduleProvider(ScheduleProvider):
     """Scrape weekly schedule from 103fm.maariv.co.il."""
 
@@ -76,10 +120,18 @@ class FM103ScheduleProvider(ScheduleProvider):
         self._timeout = timeout
 
     def fetch_for_datetime(self, when: datetime) -> Optional[ScheduledShow]:
-        # Schedule times are in Israeli local time; convert if caller passed UTC/aware dt
-        when_local = when.astimezone(_IDT) if when.tzinfo is not None else when
-        target_date = when_local.date()
-        target_t = when_local.time()
+        shows = self.fetch_for_window(when, when)
+        return shows[0] if shows else None
+
+    def fetch_for_window(self, start: datetime, end: datetime) -> list[ScheduledShow]:
+        """All shows overlapping [start, end] (Israel local time; aware dts converted).
+
+        A recording can span a show boundary (e.g. 17:39–18:34 covers the end of
+        "חמש בערב" and the start of "ספורט"), so host matching needs every show.
+        """
+        start_local = start.astimezone(_IDT).replace(tzinfo=None) if start.tzinfo else start
+        end_local = end.astimezone(_IDT).replace(tzinfo=None) if end.tzinfo else end
+        target_date = start_local.date()
         day_id = _israeli_day_id(target_date)
 
         entries = _fetch_and_parse(target_date, day_id, self._timeout)
@@ -87,25 +139,44 @@ class FM103ScheduleProvider(ScheduleProvider):
             logger.warning(
                 f"103fm: no entries parsed for {target_date} (day_id={day_id})"
             )
-            return None
+            return []
 
+        # Absolute start datetimes: entries after midnight (time going backwards,
+        # e.g. 23:00 → 00:00) belong to the next calendar day.
+        starts: list[datetime] = []
+        day = target_date
+        for i, (t, _n, _h) in enumerate(entries):
+            if i and t < entries[i - 1][0]:
+                day = day + timedelta(days=1)
+            starts.append(datetime.combine(day, t))
+
+        shows: list[ScheduledShow] = []
         for i, (t, name, href) in enumerate(entries):
-            start = t
-            end = entries[i + 1][0] if i + 1 < len(entries) else time(23, 59, 59)
-            if _time_in_range(target_t, start, end):
-                return ScheduledShow(
+            s_dt = starts[i]
+            e_dt = starts[i + 1] if i + 1 < len(starts) else s_dt + timedelta(hours=6)
+            overlaps = (s_dt <= start_local < e_dt) or (start_local < s_dt <= end_local)
+            if not overlaps:
+                continue
+            url = (
+                f"https://103fm.maariv.co.il{href}"
+                if href and href.startswith("/")
+                else (href if href and href != "#" else None)
+            )
+            desc = _fetch_program_description(url, self._timeout) if url else None
+            desc_hosts = _hosts_from_description(desc)
+            hosts = desc_hosts or _extract_hosts(name)
+            shows.append(
+                ScheduledShow(
                     station=self.station,
                     show_name=name,
-                    start_time=datetime.combine(target_date, start),
-                    end_time=datetime.combine(target_date, end),
-                    hosts=_extract_hosts(name),
-                    program_url=(
-                        f"https://103fm.maariv.co.il{href}"
-                        if href and href.startswith("/")
-                        else (href or None)
-                    ),
+                    start_time=s_dt,
+                    end_time=e_dt,
+                    hosts=hosts,
+                    description=desc,
+                    program_url=url,
                 )
-        return None
+            )
+        return shows
 
 
 # Cache parsed entries per (date, day_id). Schedules don't change intra-day, and

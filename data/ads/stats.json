@@ -1,0 +1,92 @@
+{
+ "gold": {
+  "ad": {
+   "count": 25,
+   "minutes": 8.17
+  },
+  "jingle": {
+   "count": 2,
+   "minutes": 0.07
+  },
+  "news": {
+   "count": 2,
+   "minutes": 1.9
+  },
+  "promo": {
+   "count": 3,
+   "minutes": 1.02
+  },
+  "station_id": {
+   "count": 1,
+   "minutes": 0.17
+  },
+  "non_content_minutes": 11.32,
+  "non_content_pct": 20.6
+ },
+ "agreement": {
+  "hour1:chunk.part_type": {
+   "spans": 1,
+   "labeled_sec": 301,
+   "precision": 0.76,
+   "recall": 0.34
+  },
+  "hour1:chunk.topic_title": {
+   "spans": 9,
+   "labeled_sec": 363,
+   "precision": 0.77,
+   "recall": 0.41
+  },
+  "hour1:parts.type": {
+   "spans": 1,
+   "labeled_sec": 301,
+   "precision": 0.76,
+   "recall": 0.34
+  },
+  "hour1:merged_topics.title": {
+   "spans": 9,
+   "labeled_sec": 235,
+   "precision": 0.45,
+   "recall": 0.16
+  },
+  "hour1:speaker_role=media_clip": {
+   "spans": 45,
+   "labeled_sec": 258,
+   "precision": 0.72,
+   "recall": 0.28
+  },
+  "hour1:ALL_except_media_clip": {
+   "labeled_sec": 508,
+   "precision": 0.66,
+   "recall": 0.49
+  },
+  "hour2:chunk.topic_title": {
+   "spans": 4,
+   "labeled_sec": 123,
+   "precision": 0.5,
+   "recall": 0.09
+  },
+  "hour2:parts.type": {
+   "spans": 1,
+   "labeled_sec": 301,
+   "precision": 0.76,
+   "recall": 0.34
+  },
+  "hour2:merged_topics.title": {
+   "spans": 8,
+   "labeled_sec": 271,
+   "precision": 0.97,
+   "recall": 0.39
+  },
+  "hour2:speaker_role=media_clip": {
+   "spans": 103,
+   "labeled_sec": 739,
+   "precision": 0.89,
+   "recall": 0.96
+  },
+  "hour2:ALL_except_media_clip": {
+   "labeled_sec": 640,
+   "precision": 0.78,
+   "recall": 0.73
+  }
+ }
+}

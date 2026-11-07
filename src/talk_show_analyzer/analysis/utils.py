@@ -19,9 +19,32 @@ def extract_fenced_json(text: str) -> Any:
     if not text or not text.strip():
         raise ValueError("empty response from model")
     cleaned = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL).strip()
-    fence = re.search(r"```(?:json)?\s*(.+?)\s*```", cleaned, flags=re.DOTALL)
-    payload = fence.group(1) if fence else cleaned
-    return json.loads(payload)
+    fences = re.findall(r"```(?:json)?\s*(.+?)\s*```", cleaned, flags=re.DOTALL)
+    if not fences:
+        return parse_leading_json(cleaned)
+    # Prefer the last block (the answer follows any reasoning); fall back to earlier ones.
+    first_error: Exception | None = None
+    for payload in reversed(fences):
+        try:
+            return parse_leading_json(payload)
+        except ValueError as e:  # JSONDecodeError is a ValueError
+            first_error = first_error or e
+    raise first_error  # type: ignore[misc]
+
+
+def parse_leading_json(text: str) -> Any:
+    """json.loads that tolerates prose before/after the JSON value.
+
+    Haiku sometimes appends an explanation after the JSON ("Extra data" error).
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        starts = [i for i in (text.find("["), text.find("{")) if i >= 0]
+        if not starts:
+            raise
+        value, _ = json.JSONDecoder().raw_decode(text[min(starts):])
+        return value
 
 
 def safe_response_text(response) -> str:

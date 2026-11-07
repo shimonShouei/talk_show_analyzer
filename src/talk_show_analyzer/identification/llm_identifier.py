@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from talk_show_analyzer.config import settings
 from talk_show_analyzer.models import Person, SpeakerIdentity
+from talk_show_analyzer.identification.person_registry import get_or_create_person
 from talk_show_analyzer.transcription.transcriber import (
     SpeakerSegment,
     TranscriptionResult,
@@ -562,12 +563,8 @@ class UnifiedSpeakerIdentifier:
             # Persist Person once per cluster (shared across original labels).
             person_id = None
             if name_en != "Unknown":
-                person = session.query(Person).filter_by(name_en=name_en).first()
-                if not person:
-                    person = Person(name_he=name_he, name_en=name_en, role=role)
-                    session.add(person)
-                    session.flush()
-                person_id = person.id
+                person = get_or_create_person(session, name_he, name_en, role)
+                person_id = person.id if person else None
 
             originals = merged_to_originals[canonical]
             for original_label in originals:
@@ -650,6 +647,11 @@ Common Israeli radio patterns that reveal a speaker's identity:
 - Caller greeting: "שלום [NAME] מ-[CITY]" → that caller is [NAME]
 - Attribution: "כך אמר [NAME]" immediately after a long monologue → that speaker was [NAME]
 
+Radio-specific pitfalls:
+- Commercials, promos, news bulletins and weather reports are voiced by announcers. A name spoken INSIDE an ad or news item (e.g. a character in a jingle, "קוראים לי ניר, הקריין של...", a politician quoted in the news) is NOT the identity of that voice — use role "media_clip" with name "Unknown" for such voices.
+- One real person = one name. Do not give the same name to two labels unless the transcript clearly shows the same person speaking under both.
+- If a scheduled-host list is given, a host-like unknown speaker who is addressed by a first name or surname matching a scheduled host can be identified as that host (use the full scheduled name). Hosts may be substitutes, so still require textual evidence.
+
 STRICT rules:
 - Only assign names with confidence ≥ 0.7 and explicit textual evidence
 - Do NOT guess from context alone
@@ -672,13 +674,13 @@ Skip speakers you cannot identify. Return an empty array [] if none can be resol
     "speaker_label": "SPEAKER_NN",
     "name_he": "שם בעברית",
     "name_en": "Name in English",
-    "role": "host|guest|caller|unknown",
+    "role": "host|guest|caller|media_clip|unknown",
     "confidence": 0.0-1.0,
     "evidence": "exact quote proving the identification"
   }}
 ]"""
 
-_DEFERRED_MAX_TRANSCRIPT_CHARS = 10_000
+_DEFERRED_MAX_TRANSCRIPT_CHARS = 30_000
 
 
 def deferred_resolve_speakers(
@@ -686,6 +688,7 @@ def deferred_resolve_speakers(
     resolved: dict[str, "ResolvedSpeaker"],
     client: anthropic.Anthropic,
     model: str = "claude-haiku-4-5-20251001",
+    schedule_hint: str | None = None,
 ) -> dict[str, "ResolvedSpeaker"]:
     """Second-pass identification: fill in Unknown speakers using indirect attributions.
 
@@ -709,37 +712,48 @@ def deferred_resolve_speakers(
         if rs.name_en != "Unknown"
     ) or "  (none yet)"
 
-    # Build a focused transcript excerpt: lines where an unknown speaker speaks
-    # plus lines where other speakers address them (search up to 3 segs after each unknown line).
+    # Build a focused excerpt. Long episodes used to be cut at the first 10k chars,
+    # so speakers who only appear later (e.g. the second show of an hour) were never
+    # seen. Now every unknown label gets its own budget, biggest talkers first, with
+    # context windows spread across the whole episode.
     unknown_set = set(unknown_labels)
-    selected_lines: list[str] = []
-    seen_indices: set[int] = set()
     segs = transcript.segments
-
+    speech: dict[str, float] = {}
+    occurrences: dict[str, list[int]] = {}
     for i, seg in enumerate(segs):
-        if seg.speaker not in unknown_set:
+        if seg.speaker in unknown_set:
+            speech[seg.speaker] = speech.get(seg.speaker, 0.0) + (seg.end - seg.start)
+            occurrences.setdefault(seg.speaker, []).append(i)
+    ordered = sorted(unknown_labels, key=lambda lab: -speech.get(lab, 0.0))
+    per_label_windows = 8
+    chosen: set[int] = set()
+    for lab in ordered:
+        occ = occurrences.get(lab, [])
+        if not occ:
             continue
-        for j in range(max(0, i - 1), min(len(segs), i + 4)):
-            if j not in seen_indices:
-                s = segs[j]
-                selected_lines.append(f"[{s.start:.0f}s] {s.speaker}: {s.text}")
-                seen_indices.add(j)
-
-    # If very few lines selected, also include segments where known speakers
-    # might be addressing or thanking an unknown speaker.
-    if len(selected_lines) < 20:
-        for i, seg in enumerate(segs):
-            if seg.speaker in unknown_set:
-                continue
-            text = seg.text or ""
-            if any(pat in text for pat in HEBREW_NAMING_PATTERNS + ["תודה", "היה אתנו", "דיברנו"]):
-                if i not in seen_indices:
-                    selected_lines.append(f"[{seg.start:.0f}s] {seg.speaker}: {text}")
-                    seen_indices.add(i)
-
-    transcript_excerpt = "\n".join(selected_lines)
+        step = max(1, len(occ) // per_label_windows)
+        for i in occ[::step][:per_label_windows]:
+            chosen.update(range(max(0, i - 2), min(len(segs), i + 4)))
+    # Naming moments by known speakers anywhere (thanks / introductions).
+    for i, seg in enumerate(segs):
+        if seg.speaker not in unknown_set and any(
+            pat in (seg.text or "")
+            for pat in HEBREW_NAMING_PATTERNS + ["תודה", "היה אתנו", "דיברנו", "איתנו", "אהלן"]
+        ):
+            chosen.add(i)
+    lines: list[str] = []
+    prev = None
+    for i in sorted(chosen):
+        if prev is not None and i != prev + 1:
+            lines.append("...")
+        s_ = segs[i]
+        lines.append(f"[{s_.start:.0f}s] {s_.speaker}: {(s_.text or '')[:300]}")
+        prev = i
+    transcript_excerpt = "\n".join(lines)
     if len(transcript_excerpt) > _DEFERRED_MAX_TRANSCRIPT_CHARS:
         transcript_excerpt = transcript_excerpt[:_DEFERRED_MAX_TRANSCRIPT_CHARS] + "\n[truncated]"
+    if schedule_hint:
+        transcript_excerpt = f"{schedule_hint}\n\n{transcript_excerpt}"
 
     prompt = DEFERRED_RESOLVE_PROMPT.format(
         unknown_labels=", ".join(unknown_labels),
@@ -750,7 +764,7 @@ def deferred_resolve_speakers(
     try:
         response = client.messages.create(
             model=model,
-            max_tokens=1024,
+            max_tokens=4096,
             temperature=0,
             system=[{"type": "text", "text": DEFERRED_RESOLVE_SYSTEM, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": prompt}],
@@ -758,7 +772,9 @@ def deferred_resolve_speakers(
         raw = response.content[0].text.strip() if response.content else ""
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw).strip()
-        data: list[dict] = json.loads(raw) if raw else []
+        from talk_show_analyzer.analysis.utils import parse_leading_json
+
+        data: list[dict] = parse_leading_json(raw) if raw else []
     except Exception as exc:
         logger.warning(f"deferred_resolve: API call failed: {exc}")
         return resolved
@@ -771,8 +787,34 @@ def deferred_resolve_speakers(
             continue
         confidence = float(item.get("confidence", 0.0))
         name_en = item.get("name_en", "Unknown") or "Unknown"
+        role_item = (item.get("role") or "unknown").lower()
+        if confidence >= 0.7 and name_en == "Unknown" and role_item == "media_clip":
+            prev_rs = updated[label]
+            updated[label] = ResolvedSpeaker(
+                speaker_label=label, name_he="Unknown", name_en="Unknown",
+                role="media_clip", confidence=confidence,
+            ) if prev_rs.role in ("unknown", "media_clip") else prev_rs
+            continue
         if confidence < 0.7 or name_en == "Unknown":
             continue
+        # One person, one label: never hand out a name another label already has
+        # (the model gave "Moshe Primo" to both sports hosts in a 1-hour test).
+        from talk_show_analyzer.identification.person_registry import normalize_he
+        key = normalize_he(item.get("name_he")) or name_en.lower()
+        holder = next(
+            (lab for lab, rs in updated.items()
+             if lab != label and rs.name_en != "Unknown"
+             and (normalize_he(rs.name_he) or rs.name_en.lower()) == key),
+            None,
+        )
+        if holder is not None:
+            if holder in unknown_set and updated[holder].confidence < confidence:
+                logger.info(f"  deferred_resolve: {name_en} moved {holder} -> {label} (higher confidence)")
+                updated[holder] = resolved[holder]
+                resolved_count -= 1
+            else:
+                logger.info(f"  deferred_resolve: dropped {label} → {name_en}; name already on {holder}")
+                continue
         updated[label] = ResolvedSpeaker(
             speaker_label=label,
             name_he=item.get("name_he", "Unknown") or "Unknown",

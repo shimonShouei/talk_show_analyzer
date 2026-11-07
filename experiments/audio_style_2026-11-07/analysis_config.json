@@ -1,0 +1,18 @@
+{
+ "seed": 0,
+ "pca_hand": 20,
+ "pca_panns": 32,
+ "kmeans_k": [
+  2,
+  3,
+  4,
+  6,
+  8,
+  10
+ ],
+ "hdbscan": {
+  "min_cluster_size": 15,
+  "min_samples": 5
+ },
+ "cluster_meaning": "cluster tagged ad if >50% ad among >=3 calibration-fold gold windows; evaluated on other fold; folds by ad identity / 120s show blocks (md5 hash)"
+}

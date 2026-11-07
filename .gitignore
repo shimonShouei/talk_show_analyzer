@@ -23,17 +23,43 @@ ENV/
 .env
 .env.local
 
-# Data
+# Data. data/* stays out of git except the small ad-label metadata.
 *.mp3
 *.wav
 *.flac
-data/
+*.ogg
+data/*
+!data/ads/
+data/ads/*
+!data/ads/*.csv
+!data/ads/*.json
+!data/ads/*.md
 recordings/
 chunks/
 
+# Generated heavy artifacts (features, checkpoints, raw model dumps)
+*.npy
+*.npz
+*.pt
+*.pth
+*.ckpt
+*.bin
+models/
+checkpoints/
+panns_data/
+feats_*/
+tools/ads/raw/
+**/raw/*chunks*.json
+*.tgz
+
 # Database
 *.db
+*.sqlite
 *.sqlite3
+*.sqlite-journal
+
+# Local envs used by one-off experiments
+venv_*/
 
 # OS
 .DS_Store

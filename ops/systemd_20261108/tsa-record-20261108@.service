@@ -1,0 +1,10 @@
+[Unit]
+Description=One-off radio recording 2026-11-08 (%i)
+[Service]
+Type=simple
+Environment=TZ=Asia/Jerusalem
+ExecStart=/bin/bash %h/tsa_data/record_once_20261108.sh %i
+KillMode=control-group
+TimeoutStopSec=5
+RuntimeMaxSec=17h
+SuccessExitStatus=124 143
